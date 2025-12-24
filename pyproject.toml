@@ -45,6 +45,10 @@ dependencies = [
     "httpx>=0.25.0",
     "requests>=2.31.0",
 
+    # FastAPI server
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+
     # Database
     "sqlalchemy>=2.0.0",
     "alembic>=1.12.0",
@@ -96,9 +100,9 @@ nfl-train = "nfl_bets.scripts.train_models:main"
 nfl-backtest = "nfl_bets.scripts.backtest:main"
 
 [project.urls]
-Homepage = "https://github.com/user/nfl-bets"
-Documentation = "https://github.com/user/nfl-bets#readme"
-Repository = "https://github.com/user/nfl-bets"
+Homepage = "https://github.com/cgrove-alt/NFL-BETS"
+Documentation = "https://github.com/cgrove-alt/NFL-BETS#readme"
+Repository = "https://github.com/cgrove-alt/NFL-BETS"
 
 [tool.hatch.build.targets.wheel]
 packages = ["nfl_bets"]
