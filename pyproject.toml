@@ -104,6 +104,9 @@ Homepage = "https://github.com/cgrove-alt/NFL-BETS"
 Documentation = "https://github.com/cgrove-alt/NFL-BETS#readme"
 Repository = "https://github.com/cgrove-alt/NFL-BETS"
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["nfl_bets"]
 
