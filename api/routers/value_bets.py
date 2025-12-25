@@ -116,6 +116,70 @@ async def get_value_bets(
     }
 
 
+@router.get("/value-bets/debug")
+async def debug_value_detection(request: Request) -> dict[str, Any]:
+    """
+    Debug endpoint to test the value detection pipeline.
+
+    Runs a single poll cycle and returns detailed diagnostic info.
+    """
+    import logging
+    from nfl_bets.scheduler.jobs import poll_odds, _transform_odds_data
+
+    app_state = request.app.state.app_state
+    logger = logging.getLogger(__name__)
+
+    debug_info = {
+        "pipeline_initialized": app_state.pipeline is not None,
+        "value_detector_initialized": app_state.value_detector is not None,
+        "spread_model_loaded": False,
+        "games_count": 0,
+        "raw_odds_count": 0,
+        "transformed_odds_count": 0,
+        "features_built": 0,
+        "value_bets_found": 0,
+        "min_edge_threshold": None,
+        "errors": [],
+    }
+
+    try:
+        # Check spread model
+        if app_state.value_detector and app_state.value_detector.spread_model:
+            debug_info["spread_model_loaded"] = True
+
+        # Check min_edge setting
+        if app_state.value_detector:
+            debug_info["min_edge_threshold"] = app_state.value_detector.min_edge
+
+        # Get games
+        if app_state.pipeline:
+            games_df = await app_state.pipeline.get_upcoming_games()
+            if games_df is not None:
+                games = games_df.to_dicts()
+                debug_info["games_count"] = len(games)
+
+                # Get raw odds
+                raw_odds = await app_state.pipeline.get_game_odds()
+                debug_info["raw_odds_count"] = len(raw_odds) if raw_odds else 0
+
+                # Transform odds
+                if raw_odds and games:
+                    transformed = _transform_odds_data(raw_odds, games)
+                    debug_info["transformed_odds_count"] = len(transformed)
+
+                    # Show sample transformed odds
+                    if transformed:
+                        debug_info["sample_transformed_odds"] = transformed[:3]
+
+        # Get current value bets
+        debug_info["value_bets_found"] = len(app_state.last_value_bets)
+
+    except Exception as e:
+        debug_info["errors"].append(str(e))
+
+    return debug_info
+
+
 @router.get("/value-bets/summary")
 async def get_value_bets_summary(request: Request) -> dict[str, Any]:
     """
