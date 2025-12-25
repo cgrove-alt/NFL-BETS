@@ -161,6 +161,15 @@ class SchedulerOrchestrator:
                 replace_existing=True,
             )
 
+        # Prop polling job - hourly (separate from spreads due to API costs)
+        self.scheduler.add_job(
+            self._poll_props_job,
+            trigger=IntervalTrigger(hours=1),
+            id="poll_props",
+            name="Poll Player Props",
+            replace_existing=True,
+        )
+
         # Initialize job status
         for job in self.scheduler.get_jobs():
             self._job_status[job.id] = {
@@ -205,6 +214,39 @@ class SchedulerOrchestrator:
         if value_bets:
             logger.info(f"Found {len(value_bets)} value bet(s)")
             for bet in value_bets:
+                logger.info(
+                    f"  {bet.description}: edge={bet.edge:.1%}, "
+                    f"stake=${bet.recommended_stake:.2f}"
+                )
+
+    async def _poll_props_job(self) -> None:
+        """
+        Poll player props hourly (separate from spreads due to API costs).
+
+        Props use ~5 credits per game vs 1 for spreads, so we poll less frequently.
+        """
+        from nfl_bets.scheduler.jobs import poll_props
+
+        # Check if in active hours
+        now = datetime.now()
+        sched = self.settings.scheduler
+        if not (sched.active_hours_start <= now.hour < sched.active_hours_end):
+            logger.debug(f"Outside active hours for props ({sched.active_hours_start}-{sched.active_hours_end})")
+            return
+
+        # Run the polling job
+        prop_bets = await poll_props(
+            pipeline=self.pipeline,
+            feature_pipeline=self.feature_pipeline,
+            value_detector=self.value_detector,
+            bankroll_manager=self.bankroll_manager,
+        )
+
+        # Merge with existing value bets (don't overwrite spread bets)
+        if prop_bets:
+            self._last_value_bets.extend(prop_bets)
+            logger.info(f"Found {len(prop_bets)} prop value bet(s)")
+            for bet in prop_bets:
                 logger.info(
                     f"  {bet.description}: edge={bet.edge:.1%}, "
                     f"stake=${bet.recommended_stake:.2f}"

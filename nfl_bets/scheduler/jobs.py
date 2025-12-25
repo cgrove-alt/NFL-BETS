@@ -306,3 +306,176 @@ async def trigger_model_retrain() -> dict:
             "error": str(e),
             "retrained_at": datetime.now(),
         }
+
+
+def parse_props(props_data: dict, game: dict) -> list[dict]:
+    """
+    Parse Odds API player props response into list format.
+
+    Args:
+        props_data: Raw response from The Odds API player props endpoint
+        game: Game dict with game_id, season, week, home_team, away_team
+
+    Returns:
+        List of prop dicts with player_id, player_name, prop_type, line, odds
+    """
+    props_list = []
+    market_map = {
+        "player_pass_yds": "passing_yards",
+        "player_rush_yds": "rushing_yards",
+        "player_reception_yds": "receiving_yards",
+        "player_receptions": "receptions",
+    }
+
+    for bookmaker in props_data.get("bookmakers", []):
+        for market in bookmaker.get("markets", []):
+            prop_type = market_map.get(market.get("key"))
+            if not prop_type:
+                continue
+
+            # Group outcomes by player to get both over/under
+            player_outcomes = {}
+            for outcome in market.get("outcomes", []):
+                player_name = outcome.get("description")
+                if not player_name:
+                    continue
+                if player_name not in player_outcomes:
+                    player_outcomes[player_name] = {"line": outcome.get("point")}
+                if outcome.get("name") == "Over":
+                    player_outcomes[player_name]["over_odds"] = outcome.get("price")
+                else:
+                    player_outcomes[player_name]["under_odds"] = outcome.get("price")
+
+            for player_name, odds in player_outcomes.items():
+                props_list.append({
+                    "player_id": player_name,  # Use name as ID for now
+                    "player_name": player_name,
+                    "prop_type": prop_type,
+                    "line": odds.get("line"),
+                    "over_odds": odds.get("over_odds"),
+                    "under_odds": odds.get("under_odds"),
+                    "bookmaker": bookmaker.get("key"),
+                    "game_id": game.get("game_id"),
+                    "season": game.get("season"),
+                    "week": game.get("week"),
+                    "team": game.get("home_team"),  # Approximate
+                    "opponent": game.get("away_team"),
+                })
+
+    return props_list
+
+
+async def poll_props(
+    pipeline: Any,
+    feature_pipeline: Any,
+    value_detector: Any,
+    bankroll_manager: Any,
+) -> list:
+    """
+    Poll player props and detect value bets.
+
+    Runs hourly (separate from spreads) to manage API costs.
+    Props use ~5 credits per game vs 1 for spreads.
+
+    Args:
+        pipeline: DataPipeline instance
+        feature_pipeline: FeaturePipeline instance
+        value_detector: ValueDetector instance
+        bankroll_manager: BankrollManager instance
+
+    Returns:
+        List of ValueBet opportunities found for player props
+    """
+    from nfl_bets.betting.kelly_calculator import KellyCalculator
+
+    logger.info("Starting props poll...")
+    start_time = datetime.now()
+
+    try:
+        # 1. Get upcoming games
+        games_df = await pipeline.get_upcoming_games()
+        if games_df is None or len(games_df) == 0:
+            logger.debug("No upcoming games for props poll")
+            return []
+
+        games = games_df.to_dicts()
+        logger.info(f"Found {len(games)} upcoming games for props")
+
+        # 2. Fetch player props for each game
+        all_props = []
+        for game in games:
+            game_id = game.get("game_id")
+            if not game_id:
+                continue
+            try:
+                props_data = await pipeline.get_player_props(game_id)
+                if props_data:
+                    parsed = parse_props(props_data, game)
+                    all_props.extend(parsed)
+            except Exception as e:
+                logger.debug(f"No props for {game_id}: {e}")
+
+        if not all_props:
+            logger.info("No player props available")
+            return []
+
+        logger.info(f"Found {len(all_props)} player props across all games")
+
+        # 3. Build features for each unique player
+        player_features = {}
+        for prop in all_props:
+            player_id = prop.get("player_id")
+            if player_id in player_features:
+                continue
+
+            season = prop.get("season")
+            week = prop.get("week")
+            if not season or not week:
+                continue
+
+            try:
+                pf = await feature_pipeline.build_prop_features(
+                    game_id=prop["game_id"],
+                    player_id=player_id,
+                    player_name=prop["player_name"],
+                    prop_type=prop["prop_type"],
+                    season=int(season),
+                    week=int(week),
+                    opponent_team=prop["opponent"],
+                )
+                player_features[player_id] = pf.features
+            except Exception as e:
+                logger.debug(f"Could not build prop features for {player_id}: {e}")
+
+        logger.info(f"Built features for {len(player_features)} players")
+
+        # 4. Run prop value detection
+        if not player_features:
+            logger.warning("No player features built, skipping prop detection")
+            return []
+
+        result = value_detector.scan_props(
+            props=all_props,
+            player_features=player_features,
+        )
+
+        value_bets = result.value_bets
+
+        # 5. Calculate recommended stakes
+        kelly = KellyCalculator()
+        for bet in value_bets:
+            stake = kelly.calculate_stake(
+                bankroll=bankroll_manager.current_bankroll,
+                win_probability=bet.model_probability,
+                odds=bet.odds,
+            )
+            bet.recommended_stake = stake.recommended_stake
+
+        elapsed = (datetime.now() - start_time).total_seconds()
+        logger.info(f"Props poll complete in {elapsed:.1f}s, found {len(value_bets)} prop bets")
+
+        return value_bets
+
+    except Exception as e:
+        logger.error(f"Props polling failed: {e}")
+        return []

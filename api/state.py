@@ -75,12 +75,24 @@ class AppState:
                 logger.warning(f"Spread model not found: {e}")
                 spread_model = None
 
-            # Initialize value detector with spread model
+            # Load prop models for player prop predictions
+            prop_models = {}
+            prop_types = ["passing_yards", "rushing_yards", "receiving_yards", "receptions"]
+            for prop_type in prop_types:
+                try:
+                    model = self.model_manager.load_prop_model(prop_type)
+                    prop_models[prop_type] = model
+                    logger.info(f"Prop model loaded: {prop_type}")
+                except FileNotFoundError:
+                    logger.warning(f"Prop model not found: {prop_type}")
+
+            # Initialize value detector with spread and prop models
             self.value_detector = ValueDetector(
                 spread_model=spread_model,
+                prop_models=prop_models,
                 min_edge=float(self.settings.value_detection.min_edge_threshold),
             )
-            logger.info("Value detector initialized")
+            logger.info(f"Value detector initialized with {len(prop_models)} prop models")
 
             # Initialize bankroll manager
             self.bankroll_manager = BankrollManager(
