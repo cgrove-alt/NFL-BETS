@@ -97,7 +97,7 @@ async def get_value_bets(
                 recommended_stake=bet.recommended_stake,
                 urgency=bet.urgency.value if hasattr(bet.urgency, "value") else str(bet.urgency),
                 detected_at=bet.detected_at.isoformat() if bet.detected_at else datetime.now().isoformat(),
-                expires_at=bet.expires_at.isoformat() if bet.expires_at else None,
+                expires_at=None,  # ValueBet doesn't have expires_at field
             )
         )
 

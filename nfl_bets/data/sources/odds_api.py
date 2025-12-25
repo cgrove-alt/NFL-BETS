@@ -681,5 +681,5 @@ class OddsAPIClientFactory:
             cache_ttl_seconds=settings.odds_api.cache_ttl_seconds,
             enabled=bool(settings.odds_api.api_key),
             regions=settings.odds_api.regions,
-            bookmakers=settings.odds_api.preferred_books,
+            bookmakers=settings.odds_api.default_bookmakers,
         )

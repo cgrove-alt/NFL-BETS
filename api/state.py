@@ -67,8 +67,17 @@ class AppState:
             self.model_manager = ModelManager()
             logger.info("Model manager initialized")
 
-            # Initialize value detector
+            # Load spread model for predictions
+            try:
+                spread_model = self.model_manager.load_spread_model()
+                logger.info("Spread model loaded successfully")
+            except FileNotFoundError as e:
+                logger.warning(f"Spread model not found: {e}")
+                spread_model = None
+
+            # Initialize value detector with spread model
             self.value_detector = ValueDetector(
+                spread_model=spread_model,
                 min_edge=float(self.settings.value_detection.min_edge_threshold),
             )
             logger.info("Value detector initialized")

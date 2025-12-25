@@ -94,7 +94,7 @@ async def poll_odds(
             stake = kelly.calculate_stake(
                 bankroll=bankroll_manager.current_bankroll,
                 win_probability=bet.model_probability,
-                decimal_odds=bet.decimal_odds,
+                odds=bet.odds,
             )
             bet.recommended_stake = stake.recommended_stake
 
