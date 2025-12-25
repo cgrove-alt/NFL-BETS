@@ -25,7 +25,6 @@ from .base import (
     FeatureScaler,
     RollingWindowMixin,
     fill_missing_features,
-    validate_feature_names,
 )
 from .team_features import TeamFeatureBuilder
 from .player_features import PlayerFeatureBuilder
@@ -49,7 +48,6 @@ __all__ = [
     "FeatureScaler",
     "RollingWindowMixin",
     "fill_missing_features",
-    "validate_feature_names",
     # Feature builders
     "TeamFeatureBuilder",
     "PlayerFeatureBuilder",
