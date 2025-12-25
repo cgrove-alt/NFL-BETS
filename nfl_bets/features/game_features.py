@@ -278,7 +278,7 @@ class GameFeatureBuilder(BaseFeatureBuilder):
         if len(current_game) == 0:
             return features
 
-        current_date = current_game["game_date"][0]
+        current_date = current_game["gameday"][0]
         if current_date is None:
             return features
 
@@ -286,14 +286,14 @@ class GameFeatureBuilder(BaseFeatureBuilder):
         home_prev = (
             schedules_df.filter(
                 ((pl.col("home_team") == home_team) | (pl.col("away_team") == home_team))
-                & (pl.col("game_date") < current_date)
+                & (pl.col("gameday") < current_date)
             )
-            .sort("game_date", descending=True)
+            .sort("gameday", descending=True)
             .head(1)
         )
 
         if len(home_prev) > 0:
-            prev_date = home_prev["game_date"][0]
+            prev_date = home_prev["gameday"][0]
             if prev_date is not None:
                 if isinstance(current_date, datetime) and isinstance(prev_date, datetime):
                     features["home_rest_days"] = (current_date - prev_date).days
@@ -304,14 +304,14 @@ class GameFeatureBuilder(BaseFeatureBuilder):
         away_prev = (
             schedules_df.filter(
                 ((pl.col("home_team") == away_team) | (pl.col("away_team") == away_team))
-                & (pl.col("game_date") < current_date)
+                & (pl.col("gameday") < current_date)
             )
-            .sort("game_date", descending=True)
+            .sort("gameday", descending=True)
             .head(1)
         )
 
         if len(away_prev) > 0:
-            prev_date = away_prev["game_date"][0]
+            prev_date = away_prev["gameday"][0]
             if prev_date is not None:
                 if isinstance(current_date, datetime) and isinstance(prev_date, datetime):
                     features["away_rest_days"] = (current_date - prev_date).days

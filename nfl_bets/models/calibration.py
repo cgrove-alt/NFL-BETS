@@ -95,6 +95,17 @@ class ProbabilityCalibrator:
         self.is_fitted = False
         self.logger = logger.bind(component="calibrator")
 
+    def __getstate__(self):
+        """Exclude logger from pickling."""
+        state = self.__dict__.copy()
+        del state["logger"]
+        return state
+
+    def __setstate__(self, state):
+        """Restore logger after unpickling."""
+        self.__dict__.update(state)
+        self.logger = logger.bind(component="calibrator")
+
     def fit(
         self,
         predicted_probs: np.ndarray,

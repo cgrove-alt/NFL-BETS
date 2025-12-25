@@ -8,6 +8,8 @@ Computes rolling team performance metrics from play-by-play data:
 - Defensive performance
 - Situational efficiency (red zone, third down)
 """
+from __future__ import annotations
+
 from datetime import datetime
 from typing import Optional
 

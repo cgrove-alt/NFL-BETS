@@ -8,6 +8,8 @@ Provides unified access to all data sources with:
 - Team name standardization
 - Graceful degradation when sources unavailable
 """
+from __future__ import annotations
+
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime

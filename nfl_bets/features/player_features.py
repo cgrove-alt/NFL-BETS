@@ -7,6 +7,8 @@ Computes rolling player performance metrics for prop predictions:
 - Usage trends
 - Matchup features (vs opponent defense)
 """
+from __future__ import annotations
+
 from datetime import datetime
 from typing import Optional
 

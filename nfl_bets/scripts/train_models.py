@@ -84,7 +84,7 @@ async def refresh_data_sources(force: bool = True) -> None:
     from nfl_bets.config.settings import get_settings
 
     settings = get_settings()
-    pipeline = DataPipeline(settings)
+    pipeline = DataPipeline.from_settings(settings)
 
     logger.info("Refreshing data sources...")
 
@@ -115,7 +115,8 @@ async def get_latest_data_cutoff(seasons: list[int]) -> datetime:
     from nfl_bets.config.settings import get_settings
 
     settings = get_settings()
-    client = NFLVerseClient(settings)
+    cache_dir = settings.data_dir / "cache" / "nflverse" if hasattr(settings, "data_dir") else None
+    client = NFLVerseClient(cache_dir=cache_dir)
 
     # Load schedules to find latest completed game
     schedules = await client.load_schedules(seasons, force_refresh=True)
@@ -154,21 +155,19 @@ async def load_training_data(
     from nfl_bets.config.settings import get_settings
 
     settings = get_settings()
-    pipeline = DataPipeline(settings)
+    pipeline = DataPipeline.from_settings(settings)
 
     logger.info(f"Loading training data for seasons: {seasons}")
 
     # Load play-by-play data
     pbp_df = await pipeline.get_historical_pbp(
         seasons=seasons,
-        force_refresh=force_refresh,
     )
     logger.info(f"Loaded {len(pbp_df):,} play-by-play records")
 
     # Load schedules
     schedules_df = await pipeline.get_schedules(
         seasons=seasons,
-        force_refresh=force_refresh,
     )
     logger.info(f"Loaded {len(schedules_df):,} games from schedules")
 
@@ -176,15 +175,13 @@ async def load_training_data(
 
 
 async def build_spread_training_dataset(
-    pbp_df: pl.DataFrame,
-    schedules_df: pl.DataFrame,
+    seasons: list[int],
 ) -> tuple[pl.DataFrame, pl.Series]:
     """
     Build feature matrix and target for spread model.
 
     Args:
-        pbp_df: Play-by-play DataFrame
-        schedules_df: Schedules DataFrame
+        seasons: List of seasons to include
 
     Returns:
         Tuple of (X features, y target)
@@ -194,19 +191,28 @@ async def build_spread_training_dataset(
     from nfl_bets.config.settings import get_settings
 
     settings = get_settings()
-    data_pipeline = DataPipeline(settings)
+    data_pipeline = DataPipeline.from_settings(settings)
     feature_pipeline = FeaturePipeline(data_pipeline)
 
     logger.info("Building spread training dataset...")
 
-    # Build training dataset
-    X, y = await feature_pipeline.build_training_dataset(
-        pbp_df=pbp_df,
-        schedules_df=schedules_df,
+    # Build training dataset - returns DataFrame with features + target
+    df = await feature_pipeline.build_training_dataset(
+        seasons=seasons,
         target="spread",
-        min_week=2,  # Need prior game data
-        exclude_playoffs=False,  # Include playoff games
+        include_playoffs=True,
     )
+
+    if len(df) == 0:
+        raise ValueError("No training data generated")
+
+    # Split into features (X) and target (y)
+    target_col = "actual_spread"
+    metadata_cols = ["game_id", "season", "week", "home_team", "away_team"]
+    feature_cols = [c for c in df.columns if c != target_col and c not in metadata_cols]
+
+    X = df.select(feature_cols)
+    y = df.get_column(target_col)
 
     logger.info(f"Built dataset with {len(X)} games and {len(X.columns)} features")
 
@@ -251,12 +257,12 @@ async def train_spread_model(
         X=X_train,
         y=y_train,
         validation_data=(X_val, y_val),
-        seasons=seasons,
     )
 
-    # Add data cutoff to metadata
+    # Add data cutoff and seasons to metadata
     if model.metadata:
         model.metadata.data_cutoff_date = data_cutoff
+        model.metadata.training_seasons = seasons
 
     # Evaluate on validation set
     metrics = model.evaluate(X_val, y_val)
@@ -303,7 +309,7 @@ async def train_prop_model(
     logger.info(f"Training {prop_type} prop model...")
 
     settings = get_settings()
-    data_pipeline = DataPipeline(settings)
+    data_pipeline = DataPipeline.from_settings(settings)
     feature_pipeline = FeaturePipeline(data_pipeline)
 
     # Build player prop training dataset
@@ -399,12 +405,12 @@ async def train_all_models(
     data_cutoff = await get_latest_data_cutoff(seasons)
     logger.info(f"Data cutoff date: {data_cutoff.strftime('%Y-%m-%d')}")
 
-    # Step 3: Load training data
-    pbp_df, schedules_df = await load_training_data(seasons, force_refresh)
-
-    # Step 4: Train spread model
-    X_spread, y_spread = await build_spread_training_dataset(pbp_df, schedules_df)
+    # Step 3: Train spread model (loads data internally)
+    X_spread, y_spread = await build_spread_training_dataset(seasons)
     await train_spread_model(X_spread, y_spread, seasons, data_cutoff, output_dir)
+
+    # Step 4: Load data for prop models
+    pbp_df, schedules_df = await load_training_data(seasons, force_refresh)
 
     # Step 5: Train prop models
     prop_types = ["passing_yards", "rushing_yards", "receiving_yards", "receptions"]

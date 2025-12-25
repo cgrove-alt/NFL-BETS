@@ -9,6 +9,8 @@ Provides access to:
 
 Features async HTTP with rate limiting, credit tracking, and caching.
 """
+from __future__ import annotations
+
 import asyncio
 from datetime import datetime, timedelta
 from typing import Any, Optional
