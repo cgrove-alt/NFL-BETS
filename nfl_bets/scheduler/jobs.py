@@ -87,7 +87,8 @@ async def poll_odds(
                     season=int(season),
                     week=int(week),
                 )
-                features[game_id] = game_features
+                # Extract the features dict from SpreadPredictionFeatures object
+                features[game_id] = game_features.features
             except Exception as e:
                 logger.warning(f"Could not build features for {game_id}: {e}")
 
