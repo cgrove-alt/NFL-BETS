@@ -15,6 +15,162 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 
+def _transform_odds_data(raw_odds: list[dict], games: list[dict]) -> list[dict]:
+    """
+    Transform raw Odds API response to format expected by ValueDetector.
+
+    The Odds API returns:
+    {
+        "id": "abc123",
+        "home_team": "Kansas City Chiefs",
+        "away_team": "Denver Broncos",
+        "bookmakers": [
+            {
+                "key": "draftkings",
+                "markets": [
+                    {
+                        "key": "spreads",
+                        "outcomes": [
+                            {"name": "Kansas City Chiefs", "point": -3.5, "price": -110},
+                            {"name": "Denver Broncos", "point": 3.5, "price": -110}
+                        ]
+                    }
+                ]
+            }
+        ]
+    }
+
+    ValueDetector expects:
+    {
+        "game_id": "2024_01_KC_DEN",
+        "bookmaker": "draftkings",
+        "home_spread": -3.5,
+        "home_odds": -110,
+        "away_odds": -110
+    }
+
+    Args:
+        raw_odds: List of raw API responses from The Odds API
+        games: List of game dicts with game_id, home_team, away_team
+
+    Returns:
+        List of transformed odds dicts for ValueDetector
+    """
+    # Build lookup from team names to game_id
+    # Key: (home_team_normalized, away_team_normalized) -> game_id
+    team_to_game = {}
+    for game in games:
+        home = game.get("home_team", "").upper()
+        away = game.get("away_team", "").upper()
+        game_id = game.get("game_id")
+        if home and away and game_id:
+            team_to_game[(home, away)] = game_id
+
+    # Team name normalization for Odds API full names
+    TEAM_NAME_MAP = {
+        "Arizona Cardinals": "ARI",
+        "Atlanta Falcons": "ATL",
+        "Baltimore Ravens": "BAL",
+        "Buffalo Bills": "BUF",
+        "Carolina Panthers": "CAR",
+        "Chicago Bears": "CHI",
+        "Cincinnati Bengals": "CIN",
+        "Cleveland Browns": "CLE",
+        "Dallas Cowboys": "DAL",
+        "Denver Broncos": "DEN",
+        "Detroit Lions": "DET",
+        "Green Bay Packers": "GB",
+        "Houston Texans": "HOU",
+        "Indianapolis Colts": "IND",
+        "Jacksonville Jaguars": "JAX",
+        "Kansas City Chiefs": "KC",
+        "Las Vegas Raiders": "LV",
+        "Los Angeles Chargers": "LAC",
+        "Los Angeles Rams": "LAR",
+        "Miami Dolphins": "MIA",
+        "Minnesota Vikings": "MIN",
+        "New England Patriots": "NE",
+        "New Orleans Saints": "NO",
+        "New York Giants": "NYG",
+        "New York Jets": "NYJ",
+        "Philadelphia Eagles": "PHI",
+        "Pittsburgh Steelers": "PIT",
+        "San Francisco 49ers": "SF",
+        "Seattle Seahawks": "SEA",
+        "Tampa Bay Buccaneers": "TB",
+        "Tennessee Titans": "TEN",
+        "Washington Commanders": "WAS",
+    }
+
+    def normalize_team(name: str) -> str:
+        """Normalize team name to abbreviation."""
+        return TEAM_NAME_MAP.get(name, name.upper())
+
+    transformed = []
+
+    for odds_event in raw_odds:
+        home_team_raw = odds_event.get("home_team", "")
+        away_team_raw = odds_event.get("away_team", "")
+
+        home_team = normalize_team(home_team_raw)
+        away_team = normalize_team(away_team_raw)
+
+        # Find matching game_id
+        game_id = team_to_game.get((home_team, away_team))
+        if not game_id:
+            # Try with normalized names
+            for (h, a), gid in team_to_game.items():
+                if h == home_team and a == away_team:
+                    game_id = gid
+                    break
+
+        if not game_id:
+            logger.debug(f"No game_id match for {home_team} vs {away_team}")
+            continue
+
+        # Process each bookmaker
+        for bookmaker in odds_event.get("bookmakers", []):
+            book_key = bookmaker.get("key", "unknown")
+
+            # Find spreads market
+            for market in bookmaker.get("markets", []):
+                if market.get("key") != "spreads":
+                    continue
+
+                outcomes = market.get("outcomes", [])
+                if len(outcomes) < 2:
+                    continue
+
+                # Parse home and away outcomes
+                home_spread = None
+                home_odds = None
+                away_odds = None
+
+                for outcome in outcomes:
+                    outcome_team = normalize_team(outcome.get("name", ""))
+                    point = outcome.get("point")
+                    price = outcome.get("price")
+
+                    if outcome_team == home_team:
+                        home_spread = point
+                        home_odds = price
+                    elif outcome_team == away_team:
+                        away_odds = price
+
+                # Only add if we have all required data
+                if home_spread is not None and home_odds is not None and away_odds is not None:
+                    transformed.append({
+                        "game_id": game_id,
+                        "bookmaker": book_key,
+                        "home_spread": home_spread,
+                        "home_odds": home_odds,
+                        "away_odds": away_odds,
+                    })
+
+    logger.info(f"Transformed {len(transformed)} odds entries from {len(raw_odds)} API events")
+    return transformed
+
+
 async def poll_odds(
     pipeline: Any,
     feature_pipeline: Any,
@@ -56,13 +212,19 @@ async def poll_odds(
         games = games_df.to_dicts()
         logger.info(f"Found {len(games)} upcoming games")
 
-        # 2. Fetch latest odds
-        odds_data = await pipeline.get_game_odds()
-        if not odds_data:
+        # 2. Fetch latest odds (raw API format)
+        raw_odds = await pipeline.get_game_odds()
+        if not raw_odds:
             logger.warning("No odds data available")
             return []
 
-        logger.info(f"Fetched odds for {len(odds_data)} games")
+        logger.info(f"Fetched odds for {len(raw_odds)} games from API")
+
+        # Transform to format expected by ValueDetector
+        odds_data = _transform_odds_data(raw_odds, games)
+        if not odds_data:
+            logger.warning("No odds matched to games after transformation")
+            return []
 
         # 3. Build features for each game
         features = {}
