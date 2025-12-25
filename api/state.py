@@ -54,7 +54,7 @@ class AppState:
             logger.info("Settings loaded")
 
             # Initialize data pipeline
-            self.pipeline = DataPipeline(self.settings)
+            self.pipeline = DataPipeline.from_settings(self.settings)
             await self.pipeline.initialize()
             logger.info("Data pipeline initialized")
 
