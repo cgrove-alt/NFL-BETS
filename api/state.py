@@ -33,6 +33,7 @@ class AppState:
         self.scheduler = None
         self._initialized = False
         self._last_value_bets: list = []
+        self._init_error: str = None  # Track initialization error
 
     async def initialize(self) -> None:
         """Initialize all application components."""
@@ -97,7 +98,9 @@ class AppState:
             logger.info("All components initialized successfully")
 
         except Exception as e:
-            logger.error(f"Failed to initialize components: {e}")
+            import traceback
+            self._init_error = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+            logger.error(f"Failed to initialize components: {self._init_error}")
             # Don't raise - allow API to start even if some components fail
             self._initialized = False
 
@@ -124,7 +127,7 @@ class AppState:
 
     def get_health_status(self) -> dict:
         """Get health status of all components."""
-        return {
+        status = {
             "initialized": self._initialized,
             "settings": self.settings is not None,
             "pipeline": self.pipeline is not None,
@@ -135,3 +138,6 @@ class AppState:
             "scheduler": self.scheduler is not None,
             "scheduler_running": self.scheduler.is_running if self.scheduler else False,
         }
+        if self._init_error:
+            status["init_error"] = self._init_error
+        return status
