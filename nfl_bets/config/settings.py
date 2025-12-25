@@ -133,6 +133,24 @@ class OddsAPISettings(BaseSettings):
         default="",
         description="API key from the-odds-api.com",
     )
+
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def load_api_key_from_env(cls, v: str) -> str:
+        """
+        Fallback to check multiple env var names.
+
+        Pydantic-settings nested models can be tricky - support both:
+        - ODDS_API_KEY (from env_prefix + field name)
+        - ODDS_API__API_KEY (from parent's nested delimiter)
+        """
+        import os
+
+        if v:
+            return v
+        # Try direct env var
+        return os.environ.get("ODDS_API_KEY", "")
+
     base_url: str = Field(
         default="https://api.the-odds-api.com/v4",
         description="Base URL for the API",

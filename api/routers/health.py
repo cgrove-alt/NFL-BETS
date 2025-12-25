@@ -56,3 +56,47 @@ async def liveness_check() -> dict[str, Any]:
         "alive": True,
         "timestamp": datetime.now().isoformat(),
     }
+
+
+@router.get("/debug/settings")
+async def debug_settings(request: Request) -> dict[str, Any]:
+    """
+    Debug endpoint to verify settings are loaded correctly.
+
+    Shows masked API key info to diagnose configuration issues.
+    """
+    import os
+
+    app_state = request.app.state.app_state
+    settings = app_state.settings
+
+    # Get API key from settings
+    api_key = ""
+    if settings and hasattr(settings, "odds_api"):
+        api_key = settings.odds_api.api_key or ""
+
+    # Also check raw environment variables
+    env_odds_api_key = os.environ.get("ODDS_API_KEY", "")
+    env_odds_api__api_key = os.environ.get("ODDS_API__API_KEY", "")
+
+    return {
+        "settings_loaded": settings is not None,
+        "odds_api_key_from_settings": {
+            "set": bool(api_key),
+            "length": len(api_key),
+            "preview": api_key[:4] + "..." if api_key and len(api_key) > 4 else "(empty)",
+        },
+        "env_vars": {
+            "ODDS_API_KEY": {
+                "set": bool(env_odds_api_key),
+                "length": len(env_odds_api_key),
+                "preview": env_odds_api_key[:4] + "..." if env_odds_api_key and len(env_odds_api_key) > 4 else "(empty)",
+            },
+            "ODDS_API__API_KEY": {
+                "set": bool(env_odds_api__api_key),
+                "length": len(env_odds_api__api_key),
+                "preview": env_odds_api__api_key[:4] + "..." if env_odds_api__api_key and len(env_odds_api__api_key) > 4 else "(empty)",
+            },
+        },
+        "timestamp": datetime.now().isoformat(),
+    }
