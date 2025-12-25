@@ -435,18 +435,206 @@ class FeaturePipeline:
         self.logger.info(f"Built training dataset: {len(df)} rows")
         return df
 
+    async def build_prop_training_dataset(
+        self,
+        pbp_df: pl.DataFrame,
+        schedules_df: pl.DataFrame,
+        prop_type: str,
+    ) -> tuple[pl.DataFrame, pl.Series]:
+        """
+        Build training dataset for player prop model.
+
+        Args:
+            pbp_df: Play-by-play DataFrame
+            schedules_df: Schedules DataFrame
+            prop_type: Type of prop (passing_yards, rushing_yards, receiving_yards, receptions)
+
+        Returns:
+            Tuple of (X features DataFrame, y target Series)
+        """
+        df = await self._build_prop_training_data(pbp_df, schedules_df, prop_type)
+
+        if len(df) == 0:
+            return pl.DataFrame(), pl.Series(name=prop_type, values=[])
+
+        # Split into features and target
+        target_col = prop_type
+        metadata_cols = ["player_id", "game_id", "season", "week", "position"]
+        feature_cols = [c for c in df.columns if c != target_col and c not in metadata_cols]
+
+        X = df.select(feature_cols)
+        y = df.get_column(target_col)
+
+        return X, y
+
     async def _build_prop_training_data(
         self,
         pbp_df: pl.DataFrame,
         schedules_df: pl.DataFrame,
-        seasons: list[int],
         prop_type: str,
     ) -> pl.DataFrame:
-        """Build training data for player prop prediction."""
-        # This would extract player performance and build features
-        # Implementation depends on prop type
-        self.logger.warning("Prop training data builder not fully implemented")
-        return pl.DataFrame()
+        """
+        Build training data for player prop prediction.
+
+        Extracts player-game records from PBP, computes target values,
+        and builds features for each player-game.
+
+        Args:
+            pbp_df: Play-by-play DataFrame
+            schedules_df: Schedules DataFrame
+            prop_type: Type of prop (passing_yards, rushing_yards, receiving_yards, receptions)
+
+        Returns:
+            DataFrame with features and target column
+        """
+        self.logger.info(f"Building prop training data for: {prop_type}")
+
+        # Extract player-game stats based on prop type
+        player_games = self._extract_player_game_stats(pbp_df, schedules_df, prop_type)
+
+        if len(player_games) == 0:
+            self.logger.warning(f"No player-game data found for {prop_type}")
+            return pl.DataFrame()
+
+        self.logger.info(f"Found {len(player_games)} player-games for {prop_type}")
+
+        # Build features for each player-game
+        results = []
+        total = len(player_games)
+
+        for i, row in enumerate(player_games.iter_rows(named=True)):
+            if i % 100 == 0:
+                self.logger.debug(f"Processing player-game {i}/{total}")
+
+            try:
+                # Get position for this prop type
+                position = self._get_position_for_prop(prop_type)
+
+                # Build features using PlayerFeatureBuilder
+                features = await self.player_builder.build_features(
+                    pbp_df=pbp_df,
+                    player_id=row["player_id"],
+                    season=row["season"],
+                    week=row["week"],
+                    position=position,
+                )
+
+                # Combine metadata, features, and target
+                result = {
+                    "player_id": row["player_id"],
+                    "game_id": row["game_id"],
+                    "season": row["season"],
+                    "week": row["week"],
+                    "position": position,
+                    prop_type: row["target"],  # The actual stat value
+                }
+                result.update(features.features)
+                results.append(result)
+
+            except Exception as e:
+                self.logger.warning(f"Failed to process {row['player_id']} {row['game_id']}: {e}")
+
+        df = pl.DataFrame(results) if results else pl.DataFrame()
+        self.logger.info(f"Built prop training dataset: {len(df)} rows")
+        return df
+
+    def _extract_player_game_stats(
+        self,
+        pbp_df: pl.DataFrame,
+        schedules_df: pl.DataFrame,
+        prop_type: str,
+    ) -> pl.DataFrame:
+        """
+        Extract player-game stats from play-by-play data.
+
+        Groups plays by player and game to compute the target stat.
+
+        Returns:
+            DataFrame with columns: player_id, game_id, season, week, target
+        """
+        # Filter to regular season completed games in week 2+
+        completed_games = schedules_df.filter(
+            (pl.col("home_score").is_not_null())
+            & (pl.col("week") >= 2)
+            & (pl.col("game_type") == "REG")
+        ).select(["game_id", "season", "week"])
+
+        if prop_type == "passing_yards":
+            # Sum yards for each passer in each game
+            player_stats = (
+                pbp_df.filter(
+                    (pl.col("passer_id").is_not_null())
+                    & (pl.col("play_type") == "pass")
+                )
+                .group_by(["passer_id", "game_id"])
+                .agg(pl.col("yards_gained").sum().alias("target"))
+                .rename({"passer_id": "player_id"})
+            )
+
+        elif prop_type == "rushing_yards":
+            # Sum yards for each rusher in each game
+            player_stats = (
+                pbp_df.filter(
+                    (pl.col("rusher_id").is_not_null())
+                    & (pl.col("play_type") == "run")
+                )
+                .group_by(["rusher_id", "game_id"])
+                .agg(pl.col("yards_gained").sum().alias("target"))
+                .rename({"rusher_id": "player_id"})
+            )
+
+        elif prop_type == "receiving_yards":
+            # Sum yards for each receiver in each game (completed passes only)
+            player_stats = (
+                pbp_df.filter(
+                    (pl.col("receiver_id").is_not_null())
+                    & (pl.col("complete_pass") == 1)
+                )
+                .group_by(["receiver_id", "game_id"])
+                .agg(pl.col("yards_gained").sum().alias("target"))
+                .rename({"receiver_id": "player_id"})
+            )
+
+        elif prop_type == "receptions":
+            # Count receptions for each receiver in each game
+            player_stats = (
+                pbp_df.filter(
+                    (pl.col("receiver_id").is_not_null())
+                    & (pl.col("complete_pass") == 1)
+                )
+                .group_by(["receiver_id", "game_id"])
+                .agg(pl.len().alias("target"))
+                .rename({"receiver_id": "player_id"})
+            )
+
+        else:
+            self.logger.error(f"Unknown prop type: {prop_type}")
+            return pl.DataFrame()
+
+        # Filter to minimum stat thresholds to reduce noise
+        min_thresholds = {
+            "passing_yards": 50,
+            "rushing_yards": 10,
+            "receiving_yards": 10,
+            "receptions": 1,
+        }
+        min_val = min_thresholds.get(prop_type, 1)
+        player_stats = player_stats.filter(pl.col("target") >= min_val)
+
+        # Join with schedule to get season/week
+        result = player_stats.join(completed_games, on="game_id", how="inner")
+
+        return result
+
+    def _get_position_for_prop(self, prop_type: str) -> str:
+        """Get the primary position for a prop type."""
+        positions = {
+            "passing_yards": "QB",
+            "rushing_yards": "RB",
+            "receiving_yards": "WR",
+            "receptions": "WR",
+        }
+        return positions.get(prop_type, "WR")
 
     def fit_scaler(self, df: pl.DataFrame, feature_cols: list[str]) -> None:
         """
