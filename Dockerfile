@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy dependency files first for better caching
-COPY pyproject.toml ./
+COPY pyproject.toml README.md ./
 
 # Create package structure for editable install
 COPY nfl_bets/ ./nfl_bets/
