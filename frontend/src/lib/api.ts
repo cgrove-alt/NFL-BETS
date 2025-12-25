@@ -2,7 +2,7 @@
  * API client for NFL Bets backend.
  */
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'https://nfl-bets-production-a5a6.up.railway.app';
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
 
 /**
  * Generic fetch wrapper with error handling.

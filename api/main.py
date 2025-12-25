@@ -67,9 +67,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",  # Local Next.js dev
-        "https://*.vercel.app",   # Vercel preview deployments
-        # Add your production domain here
     ],
+    allow_origin_regex=r"https://.*\.vercel\.app",  # All Vercel deployments
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
