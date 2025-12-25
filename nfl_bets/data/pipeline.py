@@ -221,41 +221,41 @@ class DataPipeline:
                 api_key=settings.odds_api.api_key,
                 cache_ttl_seconds=settings.odds_api.cache_ttl_seconds,
                 regions=settings.odds_api.regions,
-                bookmakers=settings.odds_api.preferred_books,
+                bookmakers=settings.odds_api.default_bookmakers,
             )
 
         # PFF (optional premium source)
         pff = None
-        if hasattr(settings, "pff_api_key") and settings.pff_api_key:
+        if hasattr(settings, "premium_data") and settings.premium_data.pff_api_key:
             pff = PFFClient(
-                api_key=settings.pff_api_key,
+                api_key=settings.premium_data.pff_api_key,
                 data_dir=data_dir / "pff" if data_dir else None,
             )
-        elif hasattr(settings, "pff_enabled") and settings.pff_enabled:
+        elif hasattr(settings, "premium_data") and settings.premium_data.pff_enabled:
             pff = PFFClient(
                 data_dir=data_dir / "pff" if data_dir else None,
             )
 
         # FTN/DVOA (optional premium source)
         ftn = None
-        if hasattr(settings, "ftn_api_key") and settings.ftn_api_key:
+        if hasattr(settings, "premium_data") and settings.premium_data.ftn_api_key:
             ftn = FTNDVOAClient(
-                api_key=settings.ftn_api_key,
+                api_key=settings.premium_data.ftn_api_key,
                 data_dir=data_dir / "ftn" if data_dir else None,
             )
-        elif hasattr(settings, "ftn_enabled") and settings.ftn_enabled:
+        elif hasattr(settings, "premium_data") and settings.premium_data.ftn_enabled:
             ftn = FTNDVOAClient(
                 data_dir=data_dir / "ftn" if data_dir else None,
             )
 
         # SIC Score (optional premium source)
         sic = None
-        if hasattr(settings, "sic_api_key") and settings.sic_api_key:
+        if hasattr(settings, "premium_data") and settings.premium_data.sic_api_key:
             sic = SICScoreClient(
-                api_key=settings.sic_api_key,
+                api_key=settings.premium_data.sic_api_key,
                 data_dir=data_dir / "sic" if data_dir else None,
             )
-        elif hasattr(settings, "sic_enabled") and settings.sic_enabled:
+        elif hasattr(settings, "premium_data") and settings.premium_data.sic_score_enabled:
             sic = SICScoreClient(
                 data_dir=data_dir / "sic" if data_dir else None,
             )

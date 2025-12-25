@@ -147,6 +147,10 @@ class OddsAPISettings(BaseSettings):
         ],
         description="Default bookmakers to fetch",
     )
+    cache_ttl_seconds: int = Field(
+        default=300,
+        description="Cache TTL for odds data in seconds",
+    )
 
 
 class PremiumDataSettings(BaseSettings):
