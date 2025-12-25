@@ -118,6 +118,10 @@ class SchedulerSettings(BaseSettings):
         default=3,
         description="Hour to sync nflfastR data (24-hour format)",
     )
+    auto_retrain_on_stale: bool = Field(
+        default=True,
+        description="Automatically retrain models when staleness detected",
+    )
 
 
 class OddsAPISettings(BaseSettings):
@@ -138,13 +142,7 @@ class OddsAPISettings(BaseSettings):
         description="Regions to fetch odds from",
     )
     default_bookmakers: list[str] = Field(
-        default=[
-            "draftkings",
-            "fanduel",
-            "betmgm",
-            "caesars",
-            "pointsbetus",
-        ],
+        default=["draftkings"],
         description="Default bookmakers to fetch",
     )
     cache_ttl_seconds: int = Field(

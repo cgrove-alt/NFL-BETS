@@ -55,13 +55,12 @@ htmlcov/
 # Data and cache files
 *.parquet
 *.pkl
-*.joblib
 nfl_bets/data/cache/*.parquet
 nfl_bets/data/cache/*.pkl
+nfl_bets/data/cache/*.joblib
 
-# Models (large files)
-nfl_bets/models/saved/*.joblib
-nfl_bets/models/saved/*.pkl
+# Keep trained models in git for Railway deployment
+# models/trained/*.joblib -- NOT ignored
 
 # Logs
 *.log

@@ -151,6 +151,16 @@ class SchedulerOrchestrator:
             replace_existing=True,
         )
 
+        # Auto-retrain job - runs 30 min after model refresh check
+        if sched_settings.auto_retrain_on_stale:
+            self.scheduler.add_job(
+                self._auto_retrain_job,
+                trigger=CronTrigger(hour=sched_settings.model_refresh_hour, minute=30),
+                id="auto_retrain",
+                name="Auto-Retrain Stale Models",
+                replace_existing=True,
+            )
+
         # Initialize job status
         for job in self.scheduler.get_jobs():
             self._job_status[job.id] = {
@@ -222,6 +232,34 @@ class SchedulerOrchestrator:
         for source, healthy in health.source_status.items():
             if not healthy:
                 logger.warning(f"Data source degraded: {source}")
+
+    async def _auto_retrain_job(self) -> None:
+        """Auto-retrain models if any are stale."""
+        from nfl_bets.scheduler.jobs import trigger_model_retrain
+
+        # Check if any models are stale
+        all_fresh, stale_models = self.model_manager.check_all_models_fresh()
+
+        if all_fresh:
+            logger.info("All models are fresh, no retraining needed")
+            return
+
+        logger.info(f"Stale models detected: {stale_models}")
+        logger.info("Starting automatic model retraining...")
+
+        result = await trigger_model_retrain()
+
+        if result.get("status") == "success":
+            logger.info("Auto-retrain completed successfully")
+            # Reload models after retraining
+            try:
+                spread_model = self.model_manager.load_spread_model()
+                self.value_detector.spread_model = spread_model
+                logger.info("Spread model reloaded")
+            except Exception as e:
+                logger.error(f"Failed to reload model after retrain: {e}")
+        else:
+            logger.error(f"Auto-retrain failed: {result.get('error')}")
 
     def _on_job_executed(self, event: JobExecutionEvent) -> None:
         """Handle successful job execution."""

@@ -6,6 +6,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     build-essential \
     git \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy dependency files first for better caching
@@ -20,8 +21,15 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -e . && \
     pip install --no-cache-dir fastapi uvicorn[standard]
 
-# Create directory for model storage
-RUN mkdir -p /app/nfl_bets/models/saved
+# Copy bundled models for initial seeding
+COPY models/trained/ ./models/bundled/
+
+# Create directory for model storage (will be Railway Volume mount point)
+RUN mkdir -p /app/models/trained
+
+# Copy startup script
+COPY scripts/startup.sh ./scripts/
+RUN chmod +x scripts/startup.sh
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
@@ -34,6 +42,5 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/api/health || exit 1
 
-# Start API server
-# Railway sets $PORT, so we use shell form to expand it
-CMD uvicorn api.main:app --host 0.0.0.0 --port ${PORT:-8000}
+# Start via startup script (seeds models to volume if needed)
+CMD ["./scripts/startup.sh"]
