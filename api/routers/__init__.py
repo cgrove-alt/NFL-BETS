@@ -1,6 +1,6 @@
 """API routers for NFL Bets."""
 
-from . import health, value_bets, bankroll, models, jobs, analytics
+from . import health, value_bets, bankroll, models, jobs, analytics, games
 
 __all__ = [
     "health",
@@ -9,4 +9,5 @@ __all__ = [
     "models",
     "jobs",
     "analytics",
+    "games",
 ]

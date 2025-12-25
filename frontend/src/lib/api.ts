@@ -110,6 +110,37 @@ export interface PerformanceMetrics {
   average_stake: number;
 }
 
+export interface GameInfo {
+  game_id: string;
+  home_team: string;
+  away_team: string;
+  kickoff: string;
+  week: number;
+  season: number;
+  value_bet_count: number;
+  best_edge: number | null;
+  best_bet_description: string | null;
+  model_prediction: number | null;
+  model_confidence: number | null;
+  vegas_line: number | null;
+}
+
+export interface GamesResponse {
+  count: number;
+  games: GameInfo[];
+}
+
+export interface GameDetailResponse {
+  game_id: string;
+  home_team: string;
+  away_team: string;
+  kickoff: string;
+  week: number;
+  season: number;
+  value_bets: ValueBet[];
+  value_bet_count: number;
+}
+
 // API Functions
 
 export async function getHealth(): Promise<HealthStatus> {
@@ -176,4 +207,18 @@ export async function getBankrollHistory(days: number = 30): Promise<{
   period_end: string;
 }> {
   return fetchAPI(`/api/analytics/bankroll-history?days=${days}`);
+}
+
+export async function getGames(params?: {
+  week?: number;
+}): Promise<GamesResponse> {
+  const searchParams = new URLSearchParams();
+  if (params?.week !== undefined) searchParams.set('week', params.week.toString());
+
+  const query = searchParams.toString();
+  return fetchAPI<GamesResponse>(`/api/games${query ? `?${query}` : ''}`);
+}
+
+export async function getGameDetail(gameId: string): Promise<GameDetailResponse> {
+  return fetchAPI<GameDetailResponse>(`/api/games/${encodeURIComponent(gameId)}`);
 }
