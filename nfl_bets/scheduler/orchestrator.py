@@ -15,6 +15,7 @@ from typing import Any, Callable, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, JobExecutionEvent
 
@@ -161,14 +162,25 @@ class SchedulerOrchestrator:
                 replace_existing=True,
             )
 
-        # Prop polling job - hourly (separate from spreads due to API costs)
+        # Prop polling - 8am game day morning (also schedules 30-min pre-game polls)
         self.scheduler.add_job(
-            self._poll_props_job,
-            trigger=IntervalTrigger(hours=1),
-            id="poll_props",
-            name="Poll Player Props",
+            self._morning_props_job,
+            trigger=CronTrigger(hour=8, minute=0),
+            id="morning_props",
+            name="Morning Props Poll (8am)",
             replace_existing=True,
         )
+
+        # Manual prop polling job (triggered by user refresh button)
+        # This job is paused by default - only runs when manually triggered
+        self.scheduler.add_job(
+            self._poll_props_job,
+            trigger=IntervalTrigger(hours=24),  # Effectively disabled
+            id="poll_props",
+            name="Poll Player Props (Manual)",
+            replace_existing=True,
+        )
+        self.scheduler.pause_job("poll_props")
 
         # Initialize job status
         for job in self.scheduler.get_jobs():
@@ -221,18 +233,16 @@ class SchedulerOrchestrator:
 
     async def _poll_props_job(self) -> None:
         """
-        Poll player props hourly (separate from spreads due to API costs).
+        Poll player props (triggered manually or by scheduled events).
 
-        Props use ~5 credits per game vs 1 for spreads, so we poll less frequently.
+        Called at:
+        - 8am game day morning (via _morning_props_job)
+        - 30 min before each game (via scheduled one-time jobs)
+        - When user clicks refresh button (via trigger_job)
         """
         from nfl_bets.scheduler.jobs import poll_props
 
-        # Check if in active hours
-        now = datetime.now()
-        sched = self.settings.scheduler
-        if not (sched.active_hours_start <= now.hour < sched.active_hours_end):
-            logger.debug(f"Outside active hours for props ({sched.active_hours_start}-{sched.active_hours_end})")
-            return
+        logger.info("Running prop poll...")
 
         # Run the polling job
         prop_bets = await poll_props(
@@ -251,6 +261,86 @@ class SchedulerOrchestrator:
                     f"  {bet.description}: edge={bet.edge:.1%}, "
                     f"stake=${bet.recommended_stake:.2f}"
                 )
+
+    async def _morning_props_job(self) -> None:
+        """
+        Morning props poll at 8am - runs on game days.
+
+        This job:
+        1. Checks if there are games today
+        2. Polls props for today's games
+        3. Schedules 30-min pre-game prop polls for each game
+        """
+        logger.info("Running 8am morning props poll...")
+
+        try:
+            # Get today's games
+            games_df = await self.pipeline.get_upcoming_games()
+            if games_df is None or len(games_df) == 0:
+                logger.info("No upcoming games for morning props poll")
+                return
+
+            games = games_df.to_dicts()
+            today = datetime.now().date()
+
+            # Filter to games happening today
+            todays_games = []
+            for game in games:
+                game_time = game.get("commence_time") or game.get("gameday")
+                if game_time:
+                    if isinstance(game_time, str):
+                        try:
+                            game_dt = datetime.fromisoformat(game_time.replace("Z", "+00:00"))
+                        except ValueError:
+                            continue
+                    else:
+                        game_dt = game_time
+
+                    if hasattr(game_dt, "date") and game_dt.date() == today:
+                        todays_games.append({"game": game, "start_time": game_dt})
+
+            if not todays_games:
+                logger.info("No games today, skipping morning props poll")
+                return
+
+            logger.info(f"Found {len(todays_games)} games today, polling props...")
+
+            # Run the morning props poll
+            await self._poll_props_job()
+
+            # Schedule 30-min pre-game polls for each game
+            for game_info in todays_games:
+                game = game_info["game"]
+                start_time = game_info["start_time"]
+                game_id = game.get("game_id", "unknown")
+
+                # Calculate 30 min before game
+                pre_game_time = start_time - timedelta(minutes=30)
+
+                # Only schedule if it's still in the future
+                if pre_game_time > datetime.now(pre_game_time.tzinfo):
+                    job_id = f"pregame_props_{game_id}"
+
+                    # Remove existing job if any (in case of reschedule)
+                    existing = self.scheduler.get_job(job_id)
+                    if existing:
+                        self.scheduler.remove_job(job_id)
+
+                    # Schedule one-time pre-game poll
+                    self.scheduler.add_job(
+                        self._poll_props_job,
+                        trigger=DateTrigger(run_date=pre_game_time),
+                        id=job_id,
+                        name=f"Pre-game Props: {game_id}",
+                        replace_existing=True,
+                    )
+                    logger.info(
+                        f"Scheduled pre-game props poll for {game_id} at "
+                        f"{pre_game_time.strftime('%H:%M')}"
+                    )
+
+        except Exception as e:
+            logger.error(f"Morning props job failed: {e}")
 
     async def _check_model_refresh_job(self) -> None:
         """Check model staleness and log warnings if stale."""
@@ -352,6 +442,9 @@ class SchedulerOrchestrator:
         """
         job = self.scheduler.get_job(job_id)
         if job:
+            # Resume if paused (needed for poll_props which is paused by default)
+            if job.next_run_time is None:
+                self.scheduler.resume_job(job_id)
             self.scheduler.modify_job(job_id, next_run_time=datetime.now())
             logger.info(f"Triggered job: {job_id}")
             return True
