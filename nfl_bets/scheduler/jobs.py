@@ -46,13 +46,15 @@ async def poll_odds(
     start_time = datetime.now()
 
     try:
-        # 1. Get upcoming games
-        games = await pipeline.get_upcoming_games()
-        if not games:
+        # 1. Get upcoming games (returns Polars DataFrame)
+        games_df = await pipeline.get_upcoming_games()
+        if games_df is None or len(games_df) == 0:
             logger.debug("No upcoming games found")
             return []
 
-        logger.debug(f"Found {len(games)} upcoming games")
+        # Convert DataFrame to list of dicts for iteration
+        games = games_df.to_dicts()
+        logger.info(f"Found {len(games)} upcoming games")
 
         # 2. Fetch latest odds
         odds_data = await pipeline.get_game_odds()
@@ -60,7 +62,7 @@ async def poll_odds(
             logger.warning("No odds data available")
             return []
 
-        logger.debug(f"Fetched odds for {len(odds_data)} games")
+        logger.info(f"Fetched odds for {len(odds_data)} games")
 
         # 3. Build features for each game
         features = {}
@@ -69,15 +71,28 @@ async def poll_odds(
             if not game_id:
                 continue
 
+            # Extract season and week from game data
+            season = game.get("season")
+            week = game.get("week")
+
+            if not season or not week:
+                logger.warning(f"Missing season/week for game {game_id}")
+                continue
+
             try:
-                game_features = await feature_pipeline.build_spread_features_for_game(
+                game_features = await feature_pipeline.build_spread_features(
                     game_id=game_id,
                     home_team=game.get("home_team"),
                     away_team=game.get("away_team"),
+                    season=int(season),
+                    week=int(week),
                 )
                 features[game_id] = game_features
             except Exception as e:
-                logger.debug(f"Could not build features for {game_id}: {e}")
+                logger.warning(f"Could not build features for {game_id}: {e}")
+
+        # Log feature building summary
+        logger.info(f"Built features for {len(features)}/{len(games)} games")
 
         # 4. Run value detection
         result = value_detector.scan_spreads(
