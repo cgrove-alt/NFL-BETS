@@ -10,8 +10,9 @@ Handles:
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -445,8 +446,12 @@ class SchedulerOrchestrator:
             # Resume if paused (needed for poll_props which is paused by default)
             if job.next_run_time is None:
                 self.scheduler.resume_job(job_id)
-            self.scheduler.modify_job(job_id, next_run_time=datetime.now())
-            logger.info(f"Triggered job: {job_id}")
+            # Use timezone-aware datetime to avoid timezone mismatch
+            # The scheduler is configured with America/New_York timezone
+            eastern = ZoneInfo("America/New_York")
+            now_eastern = datetime.now(eastern)
+            self.scheduler.modify_job(job_id, next_run_time=now_eastern)
+            logger.info(f"Triggered job: {job_id} at {now_eastern}")
             return True
         return False
 
