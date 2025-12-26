@@ -1,6 +1,20 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import {
+  RefreshCw,
+  Trophy,
+  Target,
+  AlertCircle,
+  Play,
+  Pause,
+  Calendar,
+  Clock,
+  Cpu,
+  CheckCircle,
+  XCircle,
+} from 'lucide-react';
 import {
   getValueBets,
   getBankroll,
@@ -8,6 +22,7 @@ import {
   getJobsStatus,
   getGames,
   getGameDetail,
+  getGamePredictions,
   ValueBetsResponse,
   BankrollSummary,
   ModelsStatus,
@@ -15,31 +30,35 @@ import {
   GamesResponse,
   GameInfo,
   ValueBet,
+  GamePredictions,
 } from '@/lib/api';
-import ValueBetCard from '@/components/ValueBetCard';
 import BankrollWidget from '@/components/BankrollWidget';
 import ModelStatusBadge from '@/components/ModelStatusBadge';
-import { GameCard, GameCardSkeleton } from '@/components/GameCard';
-import { GameDetailModal } from '@/components/GameDetailModal';
-
-type ViewMode = 'games' | 'bets';
+import { ThemeToggle } from '@/components/ThemeToggle';
+import { Button } from '@/components/ui/Button';
+import { Badge } from '@/components/ui/Badge';
+import { BestBets } from '@/components/BestBets';
+import { GameSelector } from '@/components/GameSelector';
+import { GameBetsDisplay } from '@/components/GameBetsDisplay';
 
 export default function Dashboard() {
-  const [viewMode, setViewMode] = useState<ViewMode>('games');
   const [valueBets, setValueBets] = useState<ValueBetsResponse | null>(null);
   const [bankroll, setBankroll] = useState<BankrollSummary | null>(null);
   const [modelsStatus, setModelsStatus] = useState<ModelsStatus | null>(null);
   const [jobsStatus, setJobsStatus] = useState<JobsStatus | null>(null);
   const [gamesData, setGamesData] = useState<GamesResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Modal state
+  // Game selection state
   const [selectedGame, setSelectedGame] = useState<GameInfo | null>(null);
   const [selectedGameBets, setSelectedGameBets] = useState<ValueBet[]>([]);
+  const [selectedGamePredictions, setSelectedGamePredictions] = useState<GamePredictions | null>(null);
   const [isLoadingGameDetail, setIsLoadingGameDetail] = useState(false);
 
-  const fetchData = async () => {
+  const fetchData = async (showRefreshing = false) => {
+    if (showRefreshing) setIsRefreshing(true);
     try {
       const [bets, bank, models, jobs, games] = await Promise.all([
         getValueBets().catch(() => null),
@@ -59,67 +78,97 @@ export default function Dashboard() {
       setError(err instanceof Error ? err.message : 'Failed to fetch data');
     } finally {
       setIsLoading(false);
+      setIsRefreshing(false);
     }
   };
 
   useEffect(() => {
     fetchData();
     // Refresh every 30 seconds
-    const interval = setInterval(fetchData, 30000);
+    const interval = setInterval(() => fetchData(false), 30000);
     return () => clearInterval(interval);
   }, []);
 
-  const handleGameClick = async (game: GameInfo) => {
+  const handleSelectGame = async (game: GameInfo | null) => {
     setSelectedGame(game);
+
+    if (!game) {
+      setSelectedGameBets([]);
+      setSelectedGamePredictions(null);
+      return;
+    }
+
     setIsLoadingGameDetail(true);
 
     try {
-      const detail = await getGameDetail(game.game_id);
-      setSelectedGameBets(detail.value_bets);
-    } catch (err) {
+      // Fetch both game detail and predictions in parallel
+      const [detail, predictions] = await Promise.all([
+        getGameDetail(game.game_id).catch(() => null),
+        getGamePredictions(game.game_id).catch(() => null),
+      ]);
+
+      if (detail) {
+        setSelectedGameBets(detail.value_bets);
+      } else {
+        // Fall back to filtering from all value bets
+        const gameBets = valueBets?.value_bets.filter(
+          bet => bet.game_id === game.game_id
+        ) || [];
+        setSelectedGameBets(gameBets);
+      }
+
+      setSelectedGamePredictions(predictions);
+    } catch {
       // Fall back to filtering from all value bets
       const gameBets = valueBets?.value_bets.filter(
         bet => bet.game_id === game.game_id
       ) || [];
       setSelectedGameBets(gameBets);
+      setSelectedGamePredictions(null);
     } finally {
       setIsLoadingGameDetail(false);
     }
   };
 
-  const handleCloseModal = () => {
-    setSelectedGame(null);
-    setSelectedGameBets([]);
-  };
-
-  // Count games with value bets
-  const gamesWithBets = gamesData?.games.filter(g => g.value_bet_count > 0).length || 0;
-
   return (
-    <div className="min-h-screen bg-gray-100">
+    <div className="min-h-screen">
       {/* Header */}
-      <header className="bg-white shadow-sm">
+      <header className="bg-surface-primary border-b border-surface-border sticky top-0 z-40">
         <div className="max-w-7xl mx-auto px-4 py-4 sm:px-6 lg:px-8">
           <div className="flex justify-between items-center">
-            <h1 className="text-2xl font-bold text-gray-900">NFL Bets Dashboard</h1>
-            <div className="flex items-center gap-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-brand-600 rounded-lg">
+                <Trophy className="w-5 h-5 text-white" />
+              </div>
+              <h1 className="text-xl font-bold text-text-primary">NFL Bets</h1>
+            </div>
+
+            <div className="flex items-center gap-3">
               {jobsStatus && (
-                <span
-                  className={`px-3 py-1 rounded-full text-sm ${
-                    jobsStatus.scheduler_running
-                      ? 'bg-green-100 text-green-800'
-                      : 'bg-red-100 text-red-800'
-                  }`}
+                <Badge
+                  variant={jobsStatus.scheduler_running ? 'success' : 'danger'}
+                  size="md"
                 >
+                  {jobsStatus.scheduler_running ? (
+                    <Play className="w-3 h-3 mr-1" />
+                  ) : (
+                    <Pause className="w-3 h-3 mr-1" />
+                  )}
                   {jobsStatus.scheduler_running ? 'Scheduler Running' : 'Scheduler Stopped'}
-                </span>
+                </Badge>
               )}
-              <button
-                onClick={fetchData}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+
+              <ThemeToggle />
+
+              <Button
+                onClick={() => fetchData(true)}
+                variant="primary"
+                size="sm"
+                loading={isRefreshing}
+                icon={<RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />}
               >
                 Refresh
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -127,113 +176,86 @@ export default function Dashboard() {
 
       {/* Main content */}
       <main className="max-w-7xl mx-auto px-4 py-6 sm:px-6 lg:px-8">
-        {error && (
-          <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
-            {error}
-          </div>
-        )}
+        <AnimatePresence>
+          {error && (
+            <motion.div
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              className="mb-6 p-4 bg-danger-light dark:bg-danger/10 border border-danger/20 rounded-xl text-danger flex items-center gap-3"
+            >
+              <AlertCircle className="w-5 h-5 flex-shrink-0" />
+              <span>{error}</span>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Left column - Games/Bets */}
-          <div className="lg:col-span-2">
-            {/* View Toggle */}
-            <div className="bg-white rounded-lg shadow-md p-4 mb-6">
-              <div className="flex items-center justify-between mb-4">
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => setViewMode('games')}
-                    className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                      viewMode === 'games'
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                    }`}
-                  >
-                    Games View
-                  </button>
-                  <button
-                    onClick={() => setViewMode('bets')}
-                    className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                      viewMode === 'bets'
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                    }`}
-                  >
-                    All Bets
-                  </button>
-                </div>
+          {/* Left column - Best Bets & Game Selector */}
+          <div className="lg:col-span-2 space-y-6">
+            {/* Best Bets Section */}
+            <BestBets
+              bets={valueBets?.value_bets || []}
+              isLoading={isLoading}
+            />
 
-                {viewMode === 'games' && gamesData && (
-                  <span className="text-sm text-gray-500">
-                    {gamesData.count} games • {gamesWithBets} with value bets
-                  </span>
-                )}
-                {viewMode === 'bets' && valueBets && (
-                  <span className="text-sm text-gray-500">
-                    {valueBets.count} opportunities
-                    {valueBets.last_poll && (
-                      <> · Last poll: {new Date(valueBets.last_poll).toLocaleTimeString()}</>
-                    )}
-                  </span>
+            {/* Game Selector Section */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.1 }}
+              className="bg-surface-primary rounded-xl shadow-card border border-surface-border p-5"
+            >
+              <div className="flex items-center gap-2 mb-4">
+                <Calendar className="w-4 h-4 text-brand-500" />
+                <h2 className="text-lg font-semibold text-text-primary">Game Bets</h2>
+                {gamesData && (
+                  <Badge variant="default" size="sm">
+                    {gamesData.count} games
+                  </Badge>
                 )}
               </div>
 
-              {/* Games View */}
-              {viewMode === 'games' && (
-                <>
-                  {isLoading ? (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      {[1, 2, 3, 4].map((i) => (
-                        <GameCardSkeleton key={i} />
-                      ))}
-                    </div>
-                  ) : gamesData && gamesData.games.length > 0 ? (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      {gamesData.games.map((game) => (
-                        <GameCard
-                          key={game.game_id}
-                          game={game}
-                          onClick={() => handleGameClick(game)}
-                          isSelected={selectedGame?.game_id === game.game_id}
-                        />
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="text-center py-8 text-gray-500">
-                      <p className="text-lg">No upcoming games found</p>
-                      <p className="text-sm mt-1">
-                        Check back later for upcoming matchups
-                      </p>
-                    </div>
-                  )}
-                </>
-              )}
+              {/* Game Selector Dropdown */}
+              <GameSelector
+                games={gamesData?.games || []}
+                selectedGame={selectedGame}
+                onSelectGame={handleSelectGame}
+                isLoading={isLoading}
+              />
 
-              {/* Bets View */}
-              {viewMode === 'bets' && (
-                <>
-                  {isLoading ? (
-                    <div className="animate-pulse space-y-4">
-                      {[1, 2, 3].map((i) => (
-                        <div key={i} className="h-32 bg-gray-200 rounded-lg"></div>
-                      ))}
-                    </div>
-                  ) : valueBets && valueBets.value_bets.length > 0 ? (
-                    <div className="space-y-4">
-                      {valueBets.value_bets.map((bet, index) => (
-                        <ValueBetCard key={`${bet.game_id}-${index}`} bet={bet} />
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="text-center py-8 text-gray-500">
-                      <p className="text-lg">No value bets found</p>
-                      <p className="text-sm mt-1">
-                        Check back later or wait for the next polling cycle
-                      </p>
-                    </div>
-                  )}
-                </>
+              {/* Selected Game Bets Display */}
+              <AnimatePresence mode="wait">
+                {selectedGame && (
+                  <motion.div
+                    key={selectedGame.game_id}
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -20 }}
+                    transition={{ duration: 0.2 }}
+                    className="mt-6"
+                  >
+                    <GameBetsDisplay
+                      game={selectedGame}
+                      valueBets={selectedGameBets}
+                      predictions={selectedGamePredictions}
+                      isLoading={isLoadingGameDetail}
+                    />
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              {/* Empty State when no game selected */}
+              {!selectedGame && !isLoading && (
+                <div className="text-center py-12 mt-4">
+                  <Target className="w-12 h-12 mx-auto text-text-muted mb-3" />
+                  <p className="text-lg text-text-secondary">Select a game above</p>
+                  <p className="text-sm text-text-muted mt-1">
+                    View moneyline, spread, and player prop bets
+                  </p>
+                </div>
               )}
-            </div>
+            </motion.div>
           </div>
 
           {/* Right column - Widgets */}
@@ -242,26 +264,41 @@ export default function Dashboard() {
             <BankrollWidget bankroll={bankroll} isLoading={isLoading} />
 
             {/* Model Status */}
-            <div className="bg-white rounded-lg shadow-md p-4">
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.1 }}
+              className="bg-surface-primary rounded-xl shadow-card border border-surface-border p-4"
+            >
               <div className="flex justify-between items-center mb-4">
-                <h3 className="text-sm font-medium text-gray-500">Model Status</h3>
+                <div className="flex items-center gap-2">
+                  <Cpu className="w-4 h-4 text-brand-500" />
+                  <h3 className="text-sm font-medium text-text-secondary">Model Status</h3>
+                </div>
                 {modelsStatus && (
-                  <span
-                    className={`px-2 py-1 rounded text-xs ${
-                      modelsStatus.all_fresh
-                        ? 'bg-green-100 text-green-800'
-                        : 'bg-yellow-100 text-yellow-800'
-                    }`}
+                  <Badge
+                    variant={modelsStatus.all_fresh ? 'success' : 'warning'}
+                    size="sm"
                   >
-                    {modelsStatus.all_fresh ? 'All Fresh' : `${modelsStatus.stale_models.length} Stale`}
-                  </span>
+                    {modelsStatus.all_fresh ? (
+                      <>
+                        <CheckCircle className="w-3 h-3 mr-1" />
+                        All Fresh
+                      </>
+                    ) : (
+                      <>
+                        <AlertCircle className="w-3 h-3 mr-1" />
+                        {modelsStatus.stale_models.length} Stale
+                      </>
+                    )}
+                  </Badge>
                 )}
               </div>
 
               {isLoading ? (
-                <div className="animate-pulse space-y-2">
+                <div className="space-y-2">
                   {[1, 2, 3, 4].map((i) => (
-                    <div key={i} className="h-16 bg-gray-200 rounded-lg"></div>
+                    <div key={i} className="h-16 bg-surface-secondary rounded-lg animate-pulse" />
                   ))}
                 </div>
               ) : modelsStatus ? (
@@ -271,18 +308,29 @@ export default function Dashboard() {
                   ))}
                 </div>
               ) : (
-                <p className="text-gray-500 text-sm">Unable to load model status</p>
+                <div className="text-center py-4">
+                  <XCircle className="w-8 h-8 mx-auto text-text-muted mb-2" />
+                  <p className="text-text-muted text-sm">Unable to load model status</p>
+                </div>
               )}
-            </div>
+            </motion.div>
 
             {/* Job Status */}
-            <div className="bg-white rounded-lg shadow-md p-4">
-              <h3 className="text-sm font-medium text-gray-500 mb-4">Scheduled Jobs</h3>
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.2 }}
+              className="bg-surface-primary rounded-xl shadow-card border border-surface-border p-4"
+            >
+              <div className="flex items-center gap-2 mb-4">
+                <Clock className="w-4 h-4 text-brand-500" />
+                <h3 className="text-sm font-medium text-text-secondary">Scheduled Jobs</h3>
+              </div>
 
               {isLoading ? (
-                <div className="animate-pulse space-y-2">
+                <div className="space-y-2">
                   {[1, 2, 3].map((i) => (
-                    <div key={i} className="h-12 bg-gray-200 rounded-lg"></div>
+                    <div key={i} className="h-12 bg-surface-secondary rounded-lg animate-pulse" />
                   ))}
                 </div>
               ) : jobsStatus ? (
@@ -290,46 +338,42 @@ export default function Dashboard() {
                   {jobsStatus.jobs.map((job) => (
                     <div
                       key={job.job_id}
-                      className="flex justify-between items-center py-2 border-b border-gray-100 last:border-0"
+                      className="flex justify-between items-center py-2.5 px-3 bg-surface-secondary rounded-lg hover:bg-surface-elevated transition-colors"
                     >
                       <div>
-                        <p className="font-medium text-sm">{job.name}</p>
+                        <p className="font-medium text-sm text-text-primary">{job.name}</p>
                         {job.next_run && (
-                          <p className="text-xs text-gray-500">
+                          <p className="flex items-center gap-1 text-xs text-text-muted mt-0.5">
+                            <Clock className="w-3 h-3" />
                             Next: {new Date(job.next_run).toLocaleTimeString()}
                           </p>
                         )}
                       </div>
-                      <span
-                        className={`px-2 py-1 rounded text-xs ${
+                      <Badge
+                        variant={
                           job.last_status === 'success'
-                            ? 'bg-green-100 text-green-800'
+                            ? 'success'
                             : job.last_status === 'error'
-                            ? 'bg-red-100 text-red-800'
-                            : 'bg-gray-100 text-gray-800'
-                        }`}
+                            ? 'danger'
+                            : 'default'
+                        }
+                        size="sm"
                       >
                         {job.last_status}
-                      </span>
+                      </Badge>
                     </div>
                   ))}
                 </div>
               ) : (
-                <p className="text-gray-500 text-sm">Unable to load job status</p>
+                <div className="text-center py-4">
+                  <XCircle className="w-8 h-8 mx-auto text-text-muted mb-2" />
+                  <p className="text-text-muted text-sm">Unable to load job status</p>
+                </div>
               )}
-            </div>
+            </motion.div>
           </div>
         </div>
       </main>
-
-      {/* Game Detail Modal */}
-      {selectedGame && (
-        <GameDetailModal
-          game={selectedGame}
-          valueBets={selectedGameBets}
-          onClose={handleCloseModal}
-        />
-      )}
     </div>
   );
 }
