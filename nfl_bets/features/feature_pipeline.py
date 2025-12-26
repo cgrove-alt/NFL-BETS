@@ -197,6 +197,81 @@ class FeaturePipeline:
         self._initialized = True
         self.logger.info("Feature pipeline initialized")
 
+    async def lookup_player_id(
+        self,
+        player_name: str,
+        season: int,
+        position: Optional[str] = None,
+    ) -> Optional[str]:
+        """
+        Look up nflverse player_id from player name using PBP data.
+
+        Args:
+            player_name: Player's display name (e.g., "Patrick Mahomes")
+            season: Season to search in
+            position: Optional position hint (QB, RB, WR, TE)
+
+        Returns:
+            Player ID if found, None otherwise
+        """
+        if not self.data_pipeline:
+            return None
+
+        try:
+            pbp_df = await self.data_pipeline.get_historical_pbp([season])
+            if pbp_df is None or len(pbp_df) == 0:
+                return None
+
+            # Normalize name for matching
+            name_lower = player_name.lower().strip()
+
+            # Search in different columns based on position
+            if position == "QB":
+                # Search passer columns
+                matches = pbp_df.filter(
+                    pl.col("passer_player_name").str.to_lowercase() == name_lower
+                ).select("passer_id").unique()
+                if len(matches) > 0:
+                    return matches["passer_id"][0]
+
+            elif position == "RB":
+                # Search rusher columns
+                matches = pbp_df.filter(
+                    pl.col("rusher_player_name").str.to_lowercase() == name_lower
+                ).select("rusher_id").unique()
+                if len(matches) > 0:
+                    return matches["rusher_id"][0]
+
+            elif position in ("WR", "TE"):
+                # Search receiver columns
+                matches = pbp_df.filter(
+                    pl.col("receiver_player_name").str.to_lowercase() == name_lower
+                ).select("receiver_id").unique()
+                if len(matches) > 0:
+                    return matches["receiver_id"][0]
+
+            # If no position hint or not found, try all columns
+            for id_col, name_col in [
+                ("passer_id", "passer_player_name"),
+                ("receiver_id", "receiver_player_name"),
+                ("rusher_id", "rusher_player_name"),
+            ]:
+                if name_col in pbp_df.columns and id_col in pbp_df.columns:
+                    matches = pbp_df.filter(
+                        pl.col(name_col).str.to_lowercase() == name_lower
+                    ).select(id_col).unique()
+                    if len(matches) > 0:
+                        player_id = matches[id_col][0]
+                        if player_id is not None:
+                            return player_id
+
+            self.logger.debug(f"Player ID not found for: {player_name}")
+            return None
+
+        except Exception as e:
+            self.logger.warning(f"Error looking up player ID for {player_name}: {e}")
+            return None
+
     async def build_spread_features(
         self,
         game_id: str,

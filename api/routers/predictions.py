@@ -307,6 +307,18 @@ async def get_all_predictions(
                 position = player_info["position"]
                 prop_types = _get_prop_type_for_position(position)
 
+                # Look up the real nflverse player_id from name
+                player_id = await app_state.feature_pipeline.lookup_player_id(
+                    player_name=player_name,
+                    season=season,
+                    position=position,
+                )
+
+                # Skip if player not found in PBP data
+                if not player_id:
+                    logger.debug(f"Player ID not found for {player_name}, skipping")
+                    continue
+
                 for prop_type in prop_types:
                     # Check if we have this prop model
                     prop_model = value_detector.prop_models.get(prop_type)
@@ -314,15 +326,16 @@ async def get_all_predictions(
                         continue
 
                     try:
-                        # Build features for this player
+                        # Build features for this player using real player_id
                         features = await app_state.feature_pipeline.build_prop_features(
                             game_id=gid,
-                            player_id=player_name,
+                            player_id=player_id,  # Use real nflverse ID
                             player_name=player_name,
                             prop_type=prop_type,
                             season=season,
                             week=week,
                             opponent_team=opponent,
+                            position=position,
                         )
 
                         if features is None or features.features is None:
@@ -331,7 +344,7 @@ async def get_all_predictions(
                         # Make prediction
                         prediction = prop_model.predict_player(
                             features=features.features,
-                            player_id=player_name,
+                            player_id=player_id,  # Use real nflverse ID
                             player_name=player_name,
                             game_id=gid,
                             team=team,
