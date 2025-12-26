@@ -896,6 +896,68 @@ async def get_all_predictions(
     }
 
 
+@router.get("/predictions/debug/spread-odds")
+async def debug_spread_odds(
+    request: Request,
+    home_team: str = Query("LAC", description="Home team abbreviation"),
+    away_team: str = Query("HOU", description="Away team abbreviation"),
+) -> dict[str, Any]:
+    """
+    Debug endpoint to test DraftKings spread fetching.
+    """
+    app_state = request.app.state.app_state
+
+    result = {
+        "home_team": home_team,
+        "away_team": away_team,
+        "pipeline_exists": app_state.pipeline is not None,
+        "odds_data_count": 0,
+        "matching_events": [],
+        "dk_spread": None,
+    }
+
+    if not app_state.pipeline:
+        return result
+
+    try:
+        odds_data = await app_state.pipeline.get_game_odds(markets=["spreads"])
+        result["odds_data_count"] = len(odds_data) if odds_data else 0
+
+        if odds_data:
+            for event in odds_data:
+                event_home_raw = event.get("home_team", "")
+                event_away_raw = event.get("away_team", "")
+                event_home = TEAM_NAME_MAP.get(event_home_raw, event_home_raw)
+                event_away = TEAM_NAME_MAP.get(event_away_raw, event_away_raw)
+
+                event_info = {
+                    "raw_home": event_home_raw,
+                    "raw_away": event_away_raw,
+                    "mapped_home": event_home,
+                    "mapped_away": event_away,
+                    "matches": event_home == home_team and event_away == away_team,
+                    "bookmakers_count": len(event.get("bookmakers", [])),
+                }
+
+                # Check for DK spreads
+                for bookmaker in event.get("bookmakers", []):
+                    if bookmaker.get("key") == "draftkings":
+                        for market in bookmaker.get("markets", []):
+                            if market.get("key") == "spreads":
+                                event_info["dk_spread_outcomes"] = market.get("outcomes", [])
+
+                result["matching_events"].append(event_info)
+
+                if event_home == home_team and event_away == away_team:
+                    dk_spread = await _fetch_draftkings_spread(app_state, home_team, away_team)
+                    result["dk_spread"] = dk_spread
+
+    except Exception as e:
+        result["error"] = str(e)
+
+    return result
+
+
 @router.get("/predictions/debug/player-lookup")
 async def debug_player_lookup(
     request: Request,
