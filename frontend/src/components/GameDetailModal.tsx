@@ -95,6 +95,23 @@ export function GameDetailModal({ game, valueBets, onClose }: GameDetailModalPro
     return typeMap[propType] || propType;
   };
 
+  const formatOddsValue = (odds: number) => {
+    return odds > 0 ? `+${odds}` : odds.toString();
+  };
+
+  const getBetConfidenceStyles = (confidence: string | undefined) => {
+    switch (confidence) {
+      case 'HIGH':
+        return { bg: 'bg-green-500', text: 'text-white', label: 'HIGH CONFIDENCE' };
+      case 'MEDIUM':
+        return { bg: 'bg-yellow-500', text: 'text-white', label: 'MEDIUM' };
+      case 'LOW':
+        return { bg: 'bg-gray-400', text: 'text-white', label: 'LOW' };
+      default:
+        return null;
+    }
+  };
+
   const getInjuryBadge = (status: string | undefined) => {
     if (!status || status === 'ACTIVE' || status === 'UNKNOWN') return null;
     const colors: Record<string, string> = {
@@ -218,39 +235,98 @@ export function GameDetailModal({ game, valueBets, onClose }: GameDetailModalPro
                       <div key={team}>
                         <h3 className="text-sm font-bold text-gray-500 mb-2 uppercase">{team}</h3>
                         <div className="grid gap-3">
-                          {teamPreds.map((pred, idx) => (
-                            <div
-                              key={`${pred.player_name}-${pred.prop_type}-${idx}`}
-                              className="bg-gradient-to-r from-purple-50 to-blue-50 border border-purple-200 rounded-xl p-4"
-                            >
-                              <div className="flex justify-between items-start mb-2">
-                                <div>
-                                  <div className="flex items-center gap-2">
-                                    <span className="font-bold text-gray-800">{pred.player_name}</span>
-                                    {getInjuryBadge(pred.injury_status)}
+                          {teamPreds.map((pred, idx) => {
+                            const hasBettingPick = pred.dk_line && pred.recommendation;
+                            const confidenceStyles = getBetConfidenceStyles(pred.bet_confidence);
+
+                            return (
+                              <div
+                                key={`${pred.player_name}-${pred.prop_type}-${idx}`}
+                                className={`border rounded-xl p-4 ${
+                                  hasBettingPick
+                                    ? 'bg-gradient-to-r from-green-50 to-emerald-50 border-green-300'
+                                    : 'bg-gradient-to-r from-purple-50 to-blue-50 border-purple-200'
+                                }`}
+                              >
+                                {/* Header with player name and prediction */}
+                                <div className="flex justify-between items-start mb-2">
+                                  <div>
+                                    <div className="flex items-center gap-2">
+                                      <span className="font-bold text-gray-800">{pred.player_name}</span>
+                                      {getInjuryBadge(pred.injury_status)}
+                                    </div>
+                                    <span className="text-sm text-purple-600 font-medium">
+                                      {formatPropType(pred.prop_type)}
+                                    </span>
                                   </div>
-                                  <span className="text-sm text-purple-600 font-medium">
-                                    {formatPropType(pred.prop_type)}
-                                  </span>
+                                  <div className="text-right">
+                                    <div className="text-2xl font-bold text-purple-700">
+                                      {pred.predicted_value.toFixed(0)}
+                                    </div>
+                                    <div className="text-xs text-gray-500">
+                                      Range: {pred.range_low.toFixed(0)} - {pred.range_high.toFixed(0)}
+                                    </div>
+                                  </div>
                                 </div>
-                                <div className="text-right">
-                                  <div className="text-2xl font-bold text-purple-700">
-                                    {pred.predicted_value.toFixed(0)}
+
+                                {/* DraftKings Line and Betting Pick */}
+                                {hasBettingPick && (
+                                  <div className="mt-3 p-3 bg-white/70 rounded-lg border border-green-200">
+                                    <div className="flex justify-between items-center">
+                                      <div>
+                                        <div className="text-xs text-gray-500 uppercase font-medium">DraftKings Line</div>
+                                        <div className="text-lg font-bold text-gray-800">
+                                          {pred.dk_line?.toFixed(1)}
+                                        </div>
+                                        <div className="text-xs text-gray-500">
+                                          O {formatOddsValue(pred.dk_over_odds || -110)} / U {formatOddsValue(pred.dk_under_odds || -110)}
+                                        </div>
+                                      </div>
+                                      <div className="text-center">
+                                        <div className={`px-4 py-2 rounded-lg ${
+                                          pred.recommendation === 'OVER'
+                                            ? 'bg-green-600 text-white'
+                                            : 'bg-red-600 text-white'
+                                        }`}>
+                                          <div className="text-xs font-medium uppercase">Pick</div>
+                                          <div className="text-xl font-bold">{pred.recommendation}</div>
+                                        </div>
+                                      </div>
+                                      <div className="text-right">
+                                        <div className="text-xs text-gray-500 uppercase font-medium">Edge</div>
+                                        <div className={`text-lg font-bold ${
+                                          (pred.edge || 0) >= 0.1 ? 'text-green-600' :
+                                          (pred.edge || 0) >= 0.05 ? 'text-yellow-600' : 'text-gray-600'
+                                        }`}>
+                                          {((pred.edge || 0) * 100).toFixed(1)}%
+                                        </div>
+                                        {confidenceStyles && (
+                                          <span className={`text-xs px-2 py-0.5 rounded ${confidenceStyles.bg} ${confidenceStyles.text}`}>
+                                            {confidenceStyles.label}
+                                          </span>
+                                        )}
+                                      </div>
+                                    </div>
                                   </div>
-                                  <div className="text-xs text-gray-500">
-                                    Range: {pred.range_low.toFixed(0)} - {pred.range_high.toFixed(0)}
+                                )}
+
+                                {/* No DraftKings line available */}
+                                {!hasBettingPick && pred.dk_line === undefined && (
+                                  <div className="mt-2 text-xs text-gray-400 italic">
+                                    DraftKings line not available
                                   </div>
+                                )}
+
+                                <div className="mt-2">
+                                  <ConfidenceGauge
+                                    value={pred.confidence}
+                                    size="sm"
+                                    label="Confidence"
+                                  />
                                 </div>
                               </div>
-                              <div className="mt-2">
-                                <ConfidenceGauge
-                                  value={pred.confidence}
-                                  size="sm"
-                                  label="Confidence"
-                                />
-                              </div>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       </div>
                     );

@@ -235,6 +235,14 @@ export interface PropPrediction {
   range_high: number;
   confidence: number;
   injury_status?: string;
+  // DraftKings line info
+  dk_line?: number;
+  dk_over_odds?: number;
+  dk_under_odds?: number;
+  // Betting recommendation
+  recommendation?: 'OVER' | 'UNDER';
+  edge?: number;
+  bet_confidence?: 'LOW' | 'MEDIUM' | 'HIGH';
 }
 
 export interface GamePredictions {

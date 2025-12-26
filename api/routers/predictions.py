@@ -24,6 +24,14 @@ class PropPredictionResponse(BaseModel):
     range_high: float  # 75th percentile
     confidence: float  # Based on prediction std
     injury_status: Optional[str] = None  # ACTIVE, QUESTIONABLE, OUT, etc.
+    # DraftKings line info (if available)
+    dk_line: Optional[float] = None  # e.g., 250.5
+    dk_over_odds: Optional[int] = None  # e.g., -110
+    dk_under_odds: Optional[int] = None  # e.g., -110
+    # Betting recommendation (if line available)
+    recommendation: Optional[str] = None  # "OVER", "UNDER", or None
+    edge: Optional[float] = None  # Edge percentage (e.g., 0.05 = 5%)
+    bet_confidence: Optional[str] = None  # "LOW", "MEDIUM", "HIGH"
 
 
 class InjuryAdjustedPredictionResponse(BaseModel):
@@ -275,6 +283,193 @@ def _get_prop_type_for_position(position: str) -> list[str]:
     return []
 
 
+# Team name mapping from full names to abbreviations (for Odds API)
+TEAM_NAME_MAP = {
+    "Arizona Cardinals": "ARI",
+    "Atlanta Falcons": "ATL",
+    "Baltimore Ravens": "BAL",
+    "Buffalo Bills": "BUF",
+    "Carolina Panthers": "CAR",
+    "Chicago Bears": "CHI",
+    "Cincinnati Bengals": "CIN",
+    "Cleveland Browns": "CLE",
+    "Dallas Cowboys": "DAL",
+    "Denver Broncos": "DEN",
+    "Detroit Lions": "DET",
+    "Green Bay Packers": "GB",
+    "Houston Texans": "HOU",
+    "Indianapolis Colts": "IND",
+    "Jacksonville Jaguars": "JAX",
+    "Kansas City Chiefs": "KC",
+    "Las Vegas Raiders": "LV",
+    "Los Angeles Chargers": "LAC",
+    "Los Angeles Rams": "LAR",
+    "Miami Dolphins": "MIA",
+    "Minnesota Vikings": "MIN",
+    "New England Patriots": "NE",
+    "New Orleans Saints": "NO",
+    "New York Giants": "NYG",
+    "New York Jets": "NYJ",
+    "Philadelphia Eagles": "PHI",
+    "Pittsburgh Steelers": "PIT",
+    "San Francisco 49ers": "SF",
+    "Seattle Seahawks": "SEA",
+    "Tampa Bay Buccaneers": "TB",
+    "Tennessee Titans": "TEN",
+    "Washington Commanders": "WAS",
+}
+
+# Odds API prop market to internal prop type mapping
+PROP_MARKET_MAP = {
+    "player_pass_yds": "passing_yards",
+    "player_rush_yds": "rushing_yards",
+    "player_reception_yds": "receiving_yards",
+    "player_receptions": "receptions",
+}
+
+
+async def _fetch_draftkings_lines(
+    app_state: Any,
+    home_team: str,
+    away_team: str,
+) -> dict[str, dict]:
+    """
+    Fetch DraftKings prop lines for a game.
+
+    Returns dict mapping (player_name_lower, prop_type) -> line_info
+    """
+    lines = {}
+
+    if not hasattr(app_state, 'pipeline') or not app_state.pipeline:
+        return lines
+
+    odds_api = getattr(app_state.pipeline, 'odds_api', None)
+    if not odds_api:
+        logger.debug("No odds_api client available")
+        return lines
+
+    try:
+        # Get Odds API events to find event_id for this game
+        events = await odds_api.get_events()
+        if not events:
+            logger.debug("No events from Odds API")
+            return lines
+
+        # Find the event matching our game
+        event_id = None
+        for event in events:
+            event_home = TEAM_NAME_MAP.get(event.get("home_team", ""), "")
+            event_away = TEAM_NAME_MAP.get(event.get("away_team", ""), "")
+            if event_home == home_team and event_away == away_team:
+                event_id = event.get("id")
+                break
+
+        if not event_id:
+            logger.debug(f"No Odds API event found for {away_team} @ {home_team}")
+            return lines
+
+        # Fetch player props from DraftKings
+        props_data = await odds_api.get_player_props(
+            event_id=event_id,
+            bookmakers=["draftkings"],
+        )
+
+        if not props_data or "bookmakers" not in props_data:
+            logger.debug(f"No props data for event {event_id}")
+            return lines
+
+        # Parse the response
+        for bookmaker in props_data.get("bookmakers", []):
+            if bookmaker.get("key") != "draftkings":
+                continue
+
+            for market in bookmaker.get("markets", []):
+                market_key = market.get("key", "")
+                prop_type = PROP_MARKET_MAP.get(market_key)
+                if not prop_type:
+                    continue
+
+                # Group outcomes by player (Over/Under pairs)
+                player_outcomes = {}
+                for outcome in market.get("outcomes", []):
+                    player_name = outcome.get("description", "")
+                    if not player_name:
+                        continue
+
+                    if player_name not in player_outcomes:
+                        player_outcomes[player_name] = {}
+
+                    side = outcome.get("name", "").lower()
+                    player_outcomes[player_name][side] = {
+                        "point": outcome.get("point"),
+                        "price": outcome.get("price"),
+                    }
+
+                # Store parsed lines
+                for player_name, outcomes in player_outcomes.items():
+                    over_data = outcomes.get("over", {})
+                    under_data = outcomes.get("under", {})
+
+                    if over_data.get("point") is not None:
+                        key = (player_name.lower().strip(), prop_type)
+                        lines[key] = {
+                            "line": over_data.get("point"),
+                            "over_odds": over_data.get("price"),
+                            "under_odds": under_data.get("price"),
+                        }
+
+        logger.info(f"Fetched {len(lines)} DraftKings lines for {away_team} @ {home_team}")
+
+    except Exception as e:
+        logger.warning(f"Failed to fetch DraftKings lines: {e}")
+
+    return lines
+
+
+def _calculate_betting_edge(
+    predicted_value: float,
+    line: float,
+    prediction_std: float,
+) -> tuple[Optional[str], Optional[float], Optional[str]]:
+    """
+    Calculate betting recommendation based on prediction vs line.
+
+    Returns (recommendation, edge, confidence)
+    - recommendation: "OVER", "UNDER", or None
+    - edge: percentage edge (e.g., 0.08 = 8%)
+    - confidence: "LOW", "MEDIUM", "HIGH"
+    """
+    if line is None or line <= 0:
+        return None, None, None
+
+    # Calculate how many std devs away the line is from prediction
+    diff = predicted_value - line
+    diff_pct = diff / line
+
+    # Calculate edge as percentage difference
+    edge = abs(diff_pct)
+
+    # Determine recommendation
+    if diff > 0:
+        recommendation = "OVER"
+    else:
+        recommendation = "UNDER"
+
+    # Only recommend if edge is significant (> 3%)
+    if edge < 0.03:
+        return None, edge, "LOW"
+
+    # Determine confidence based on edge size and prediction confidence
+    if edge >= 0.10:  # 10%+ edge
+        confidence = "HIGH"
+    elif edge >= 0.05:  # 5-10% edge
+        confidence = "MEDIUM"
+    else:  # 3-5% edge
+        confidence = "LOW"
+
+    return recommendation, edge, confidence
+
+
 @router.get("/predictions", response_model=PredictionsListResponse)
 async def get_all_predictions(
     request: Request,
@@ -353,6 +548,10 @@ async def get_all_predictions(
         # Get spread prediction if available
         spread_pred = None
         # TODO: Add spread model prediction here
+
+        # Fetch DraftKings lines for this game
+        dk_lines = await _fetch_draftkings_lines(app_state, home_team, away_team)
+        logger.info(f"Got {len(dk_lines)} DraftKings lines for {away_team} @ {home_team}")
 
         # Get player predictions for both teams
         player_preds = []
@@ -439,6 +638,23 @@ async def get_all_predictions(
                         # Calculate confidence from std dev
                         confidence = max(0.5, min(0.95, 1.0 - (prediction.prediction_std / prediction.predicted_value) if prediction.predicted_value > 0 else 0.5))
 
+                        # Look up DraftKings line for this player/prop
+                        dk_line_info = dk_lines.get((player_name.lower().strip(), prop_type))
+                        dk_line = dk_line_info.get("line") if dk_line_info else None
+                        dk_over_odds = dk_line_info.get("over_odds") if dk_line_info else None
+                        dk_under_odds = dk_line_info.get("under_odds") if dk_line_info else None
+
+                        # Calculate betting recommendation if line available
+                        recommendation = None
+                        edge = None
+                        bet_confidence = None
+                        if dk_line is not None:
+                            recommendation, edge, bet_confidence = _calculate_betting_edge(
+                                predicted_value=prediction.predicted_value,
+                                line=dk_line,
+                                prediction_std=prediction.prediction_std,
+                            )
+
                         player_preds.append(
                             PropPredictionResponse(
                                 player_name=player_name,
@@ -451,6 +667,14 @@ async def get_all_predictions(
                                 range_high=round(prediction.quantile_75, 1),
                                 confidence=round(confidence, 2),
                                 injury_status=injury_status,
+                                # DraftKings line info
+                                dk_line=dk_line,
+                                dk_over_odds=dk_over_odds,
+                                dk_under_odds=dk_under_odds,
+                                # Betting recommendation
+                                recommendation=recommendation,
+                                edge=round(edge, 4) if edge is not None else None,
+                                bet_confidence=bet_confidence,
                             )
                         )
 
@@ -593,6 +817,10 @@ async def get_game_predictions(
     if isinstance(kickoff, datetime):
         kickoff = kickoff.isoformat()
 
+    # Fetch DraftKings lines for this game
+    dk_lines = await _fetch_draftkings_lines(app_state, home_team, away_team)
+    logger.info(f"[{game_id}] Got {len(dk_lines)} DraftKings lines")
+
     # Generate predictions for this game
     player_preds = []
 
@@ -664,6 +892,23 @@ async def get_game_predictions(
 
                     confidence = max(0.5, min(0.95, 1.0 - (prediction.prediction_std / prediction.predicted_value) if prediction.predicted_value > 0 else 0.5))
 
+                    # Look up DraftKings line for this player/prop
+                    dk_line_info = dk_lines.get((player_name.lower().strip(), prop_type))
+                    dk_line = dk_line_info.get("line") if dk_line_info else None
+                    dk_over_odds = dk_line_info.get("over_odds") if dk_line_info else None
+                    dk_under_odds = dk_line_info.get("under_odds") if dk_line_info else None
+
+                    # Calculate betting recommendation if line available
+                    recommendation = None
+                    edge = None
+                    bet_confidence = None
+                    if dk_line is not None:
+                        recommendation, edge, bet_confidence = _calculate_betting_edge(
+                            predicted_value=prediction.predicted_value,
+                            line=dk_line,
+                            prediction_std=prediction.prediction_std,
+                        )
+
                     player_preds.append(
                         PropPredictionResponse(
                             player_name=player_name,
@@ -676,6 +921,14 @@ async def get_game_predictions(
                             range_high=round(prediction.quantile_75, 1),
                             confidence=round(confidence, 2),
                             injury_status=injury_status,
+                            # DraftKings line info
+                            dk_line=dk_line,
+                            dk_over_odds=dk_over_odds,
+                            dk_under_odds=dk_under_odds,
+                            # Betting recommendation
+                            recommendation=recommendation,
+                            edge=round(edge, 4) if edge is not None else None,
+                            bet_confidence=bet_confidence,
                         )
                     )
                 except Exception as e:
