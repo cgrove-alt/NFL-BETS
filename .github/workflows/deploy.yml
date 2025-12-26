@@ -43,17 +43,29 @@ jobs:
     runs-on: ubuntu-latest
     needs: test
     if: github.ref == 'refs/heads/main'
+    # Use Railway's official CLI container for best compatibility
+    container:
+      image: ghcr.io/railwayapp/cli:latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Railway CLI
-        run: npm install -g @railway/cli
-
       - name: Deploy to Railway
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: railway up --service nfl-bets-api
+          # Service ID from Railway dashboard (Settings -> General -> Service ID)
+          # Get this from: https://railway.com/project/[project-id]/service/[service-id]/settings
+          RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID }}
+        run: |
+          # Deploy to Railway using the service ID
+          # The project token scopes to the project, service ID targets the specific service
+          if [ -n "$RAILWAY_SERVICE_ID" ]; then
+            echo "Deploying to service: $RAILWAY_SERVICE_ID"
+            railway up --service $RAILWAY_SERVICE_ID --detach
+          else
+            echo "No RAILWAY_SERVICE_ID set, attempting default deploy..."
+            railway up --detach
+          fi
 
   notify:
     name: Notify on Failure
