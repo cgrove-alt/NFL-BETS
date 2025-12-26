@@ -15,9 +15,14 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 import polars as pl
 from loguru import logger
+
+# NFL game times are published in US Eastern timezone
+ET_TIMEZONE = ZoneInfo("America/New_York")
+UTC_TIMEZONE = ZoneInfo("UTC")
 
 from .sources.base import DataSourceHealth, DataSourceStatus
 from .sources.nflverse import NFLVerseClient
@@ -365,6 +370,59 @@ class DataPipeline:
         team = team.strip()
         return self.TEAM_NAME_MAP.get(team, team.upper())
 
+    def _parse_game_kickoff(self, gameday: str | None, gametime: str | None) -> datetime:
+        """
+        Parse gameday and gametime from nflverse into a timezone-aware datetime.
+
+        NFLVerse provides:
+        - gameday: date string like "2024-12-25"
+        - gametime: time string like "13:00" (in Eastern Time)
+
+        Args:
+            gameday: Date string in YYYY-MM-DD format
+            gametime: Time string in HH:MM format (Eastern Time)
+
+        Returns:
+            Timezone-aware datetime in UTC (for consistent API responses)
+        """
+        if not gameday:
+            return datetime.now(UTC_TIMEZONE)
+
+        try:
+            # Parse date
+            if isinstance(gameday, datetime):
+                date_part = gameday.date()
+            else:
+                date_part = datetime.strptime(str(gameday), "%Y-%m-%d").date()
+
+            # Parse time (default to noon ET if not provided)
+            if gametime:
+                try:
+                    time_parts = str(gametime).split(":")
+                    hour = int(time_parts[0])
+                    minute = int(time_parts[1]) if len(time_parts) > 1 else 0
+                except (ValueError, IndexError):
+                    hour, minute = 12, 0
+            else:
+                hour, minute = 12, 0
+
+            # Combine into ET datetime, then convert to UTC
+            et_datetime = datetime(
+                date_part.year,
+                date_part.month,
+                date_part.day,
+                hour,
+                minute,
+                tzinfo=ET_TIMEZONE,
+            )
+
+            # Convert to UTC for consistent storage/transmission
+            return et_datetime.astimezone(UTC_TIMEZONE)
+
+        except Exception as e:
+            self.logger.warning(f"Failed to parse game time '{gameday}' '{gametime}': {e}")
+            return datetime.now(UTC_TIMEZONE)
+
     async def get_upcoming_games(self) -> pl.DataFrame:
         """
         Get upcoming NFL games from nflverse.
@@ -616,11 +674,17 @@ class DataPipeline:
             home = self.standardize_team_name(row.get("home_team", ""))
             away = self.standardize_team_name(row.get("away_team", ""))
 
+            # Parse gameday + gametime into proper timezone-aware datetime
+            kickoff = self._parse_game_kickoff(
+                row.get("gameday"),
+                row.get("gametime"),
+            )
+
             game_data = GameData(
                 game_id=row.get("game_id", f"{away}@{home}"),
                 home_team=home,
                 away_team=away,
-                kickoff=row.get("gameday", datetime.now()),
+                kickoff=kickoff,
                 week=row.get("week", current_week or 1),
                 season=row.get("season", current_year),
             )
