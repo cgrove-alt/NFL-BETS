@@ -435,6 +435,7 @@ class FeaturePipeline:
         pbp_df: Optional[pl.DataFrame] = None,
         schedules_df: Optional[pl.DataFrame] = None,
         odds_data: Optional[dict] = None,
+        weather_data: Optional[dict] = None,
     ) -> SpreadPredictionFeatures:
         """
         Build complete feature set for spread prediction.
@@ -448,6 +449,7 @@ class FeaturePipeline:
             pbp_df: Optional play-by-play data (fetched if not provided)
             schedules_df: Optional schedules data
             odds_data: Optional odds data from Odds API
+            weather_data: Optional weather data (temp, wind)
 
         Returns:
             SpreadPredictionFeatures ready for model
@@ -492,7 +494,7 @@ class FeaturePipeline:
         # Build game context features
         if schedules_df is not None:
             game_features = await self.game_builder.build_features(
-                schedules_df, game_id, home_team, away_team, odds_data
+                schedules_df, game_id, home_team, away_team, odds_data, weather_data
             )
             features.update(game_features.features)
 
@@ -636,6 +638,62 @@ class FeaturePipeline:
                 pbp_df, schedules_df, seasons, target
             )
 
+    def _extract_odds_from_schedule_row(self, row: dict) -> Optional[dict]:
+        """
+        Extract Vegas odds from nflverse schedule data.
+
+        NFLverse schedule includes: spread_line, total_line, home_moneyline, away_moneyline
+        """
+        spread_line = row.get("spread_line")
+        total_line = row.get("total_line")
+
+        if spread_line is None and total_line is None:
+            return None
+
+        return {
+            "home_team": row.get("home_team"),
+            "away_team": row.get("away_team"),
+            "opening_spread": spread_line if spread_line is not None else 0.0,
+            "current_spread": spread_line if spread_line is not None else 0.0,
+            "spreads": {
+                "outcomes": [
+                    {"name": row.get("home_team"), "point": spread_line if spread_line is not None else 0.0}
+                ]
+            },
+            "totals": {
+                "outcomes": [
+                    {"name": "Over", "point": total_line if total_line is not None else 45.0}
+                ]
+            },
+            "home_moneyline": row.get("home_moneyline", -110),
+            "away_moneyline": row.get("away_moneyline", -110),
+        }
+
+    def _extract_weather_from_schedule_row(self, row: dict) -> Optional[dict]:
+        """
+        Extract weather data from nflverse schedule data.
+
+        NFLverse schedule includes: temp, wind, roof
+        """
+        temp = row.get("temp")
+        wind = row.get("wind")
+        roof = row.get("roof", "")
+
+        # If indoor or no weather data, return None to use defaults
+        is_indoor = roof in ("dome", "closed")
+        if is_indoor:
+            return {"temperature": 72.0, "wind_speed": 0.0, "precipitation_prob": 0.0}
+
+        # If outdoor but no weather data, return None
+        if temp is None and wind is None:
+            return None
+
+        return {
+            "temperature": float(temp) if temp is not None else 55.0,
+            "wind_speed": float(wind) if wind is not None else 8.0,
+            "precipitation_prob": 0.0,  # NFLverse doesn't have precip data
+        }
+
     async def _build_spread_training_data(
         self,
         pbp_df: pl.DataFrame,
@@ -664,6 +722,12 @@ class FeaturePipeline:
                 self.logger.debug(f"Processing game {i}/{total_games}")
 
             try:
+                # Extract Vegas odds from schedule data (already available in nflverse)
+                odds_data = self._extract_odds_from_schedule_row(row)
+
+                # Extract weather from schedule data
+                weather_data = self._extract_weather_from_schedule_row(row)
+
                 features = await self.build_spread_features(
                     game_id=row["game_id"],
                     home_team=row["home_team"],
@@ -672,6 +736,8 @@ class FeaturePipeline:
                     week=row["week"],
                     pbp_df=pbp_df,
                     schedules_df=schedules_df,
+                    odds_data=odds_data,
+                    weather_data=weather_data,
                 )
 
                 # Add target (actual spread: home - away)
@@ -727,6 +793,10 @@ class FeaturePipeline:
                 self.logger.debug(f"Processing game {i}/{total_games}")
 
             try:
+                # Extract Vegas odds and weather from schedule data
+                odds_data = self._extract_odds_from_schedule_row(row)
+                weather_data = self._extract_weather_from_schedule_row(row)
+
                 features = await self.build_spread_features(
                     game_id=row["game_id"],
                     home_team=row["home_team"],
@@ -735,6 +805,8 @@ class FeaturePipeline:
                     week=row["week"],
                     pbp_df=pbp_df,
                     schedules_df=schedules_df,
+                    odds_data=odds_data,
+                    weather_data=weather_data,
                 )
 
                 # Target is total points (home + away)

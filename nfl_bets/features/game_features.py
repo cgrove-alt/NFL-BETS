@@ -161,6 +161,16 @@ class GameFeatureBuilder(BaseFeatureBuilder):
         "implied_total",
         "home_implied_score",
         "away_implied_score",
+        # New situational features (Sprint 1)
+        "home_is_short_rest",  # < 6 days rest (TNF, etc)
+        "away_is_short_rest",
+        "home_win_streak",
+        "away_win_streak",
+        "home_loss_streak",
+        "away_loss_streak",
+        "home_coming_off_bye",
+        "away_coming_off_bye",
+        "week_of_season",  # Fatigue indicator (1-18)
     ]
 
     WEATHER_FEATURES = [
@@ -215,7 +225,7 @@ class GameFeatureBuilder(BaseFeatureBuilder):
 
         features = {}
 
-        # Build rest features
+        # Build rest features (includes short rest detection)
         rest_features = self._build_rest_features(schedules_df, game_id, home_team, away_team)
         features.update(rest_features)
 
@@ -230,6 +240,16 @@ class GameFeatureBuilder(BaseFeatureBuilder):
         # Build venue features
         venue_features = self._build_venue_features(home_team)
         features.update(venue_features)
+
+        # Build streak features (win/loss streaks)
+        streak_features = self._build_streak_features(schedules_df, game_id, home_team, away_team)
+        features.update(streak_features)
+
+        # Build situational features (week of season, bye week)
+        situational_features = self._build_situational_features(
+            schedules_df, game_id, home_team, away_team
+        )
+        features.update(situational_features)
 
         # Build Vegas features
         if odds_data:
@@ -256,6 +276,25 @@ class GameFeatureBuilder(BaseFeatureBuilder):
 
         return feature_set
 
+    def _parse_date(self, date_value) -> Optional[datetime]:
+        """Parse various date formats to datetime."""
+        if date_value is None:
+            return None
+        if isinstance(date_value, datetime):
+            return date_value
+        if isinstance(date_value, str):
+            try:
+                return datetime.strptime(date_value, "%Y-%m-%d")
+            except ValueError:
+                try:
+                    return datetime.fromisoformat(date_value)
+                except ValueError:
+                    return None
+        # Handle date objects (from polars Date type)
+        if hasattr(date_value, 'year') and hasattr(date_value, 'month') and hasattr(date_value, 'day'):
+            return datetime(date_value.year, date_value.month, date_value.day)
+        return None
+
     def _build_rest_features(
         self,
         schedules_df: pl.DataFrame,
@@ -263,11 +302,13 @@ class GameFeatureBuilder(BaseFeatureBuilder):
         home_team: str,
         away_team: str,
     ) -> dict[str, float]:
-        """Build rest advantage features."""
+        """Build rest advantage features including short rest detection."""
         features = {
             "home_rest_days": 7.0,  # Default to standard week
             "away_rest_days": 7.0,
             "rest_advantage": 0.0,
+            "home_is_short_rest": 0.0,  # < 6 days (TNF after Sunday)
+            "away_is_short_rest": 0.0,
         }
 
         if len(schedules_df) == 0:
@@ -278,45 +319,44 @@ class GameFeatureBuilder(BaseFeatureBuilder):
         if len(current_game) == 0:
             return features
 
-        current_date = current_game["gameday"][0]
+        current_date_raw = current_game["gameday"][0]
+        current_date = self._parse_date(current_date_raw)
         if current_date is None:
             return features
 
-        # Find home team's previous game
-        home_prev = (
-            schedules_df.filter(
-                ((pl.col("home_team") == home_team) | (pl.col("away_team") == home_team))
-                & (pl.col("gameday") < current_date)
-            )
-            .sort("gameday", descending=True)
-            .head(1)
+        # Find home team's previous game by iterating (handles string dates)
+        home_games = schedules_df.filter(
+            (pl.col("home_team") == home_team) | (pl.col("away_team") == home_team)
         )
 
-        if len(home_prev) > 0:
-            prev_date = home_prev["gameday"][0]
-            if prev_date is not None:
-                if isinstance(current_date, datetime) and isinstance(prev_date, datetime):
-                    features["home_rest_days"] = (current_date - prev_date).days
-                else:
-                    features["home_rest_days"] = 7.0
+        home_prev_date = None
+        for row in home_games.iter_rows(named=True):
+            row_date = self._parse_date(row.get("gameday"))
+            if row_date and row_date < current_date:
+                if home_prev_date is None or row_date > home_prev_date:
+                    home_prev_date = row_date
+
+        if home_prev_date:
+            rest_days = (current_date - home_prev_date).days
+            features["home_rest_days"] = float(rest_days)
+            features["home_is_short_rest"] = 1.0 if rest_days < 6 else 0.0
 
         # Find away team's previous game
-        away_prev = (
-            schedules_df.filter(
-                ((pl.col("home_team") == away_team) | (pl.col("away_team") == away_team))
-                & (pl.col("gameday") < current_date)
-            )
-            .sort("gameday", descending=True)
-            .head(1)
+        away_games = schedules_df.filter(
+            (pl.col("home_team") == away_team) | (pl.col("away_team") == away_team)
         )
 
-        if len(away_prev) > 0:
-            prev_date = away_prev["gameday"][0]
-            if prev_date is not None:
-                if isinstance(current_date, datetime) and isinstance(prev_date, datetime):
-                    features["away_rest_days"] = (current_date - prev_date).days
-                else:
-                    features["away_rest_days"] = 7.0
+        away_prev_date = None
+        for row in away_games.iter_rows(named=True):
+            row_date = self._parse_date(row.get("gameday"))
+            if row_date and row_date < current_date:
+                if away_prev_date is None or row_date > away_prev_date:
+                    away_prev_date = row_date
+
+        if away_prev_date:
+            rest_days = (current_date - away_prev_date).days
+            features["away_rest_days"] = float(rest_days)
+            features["away_is_short_rest"] = 1.0 if rest_days < 6 else 0.0
 
         # Calculate rest advantage (positive = home advantage)
         features["rest_advantage"] = features["home_rest_days"] - features["away_rest_days"]
@@ -500,6 +540,173 @@ class GameFeatureBuilder(BaseFeatureBuilder):
             "is_cold_game": 0.0,
             "is_windy": 0.0,
         }
+
+    def _build_streak_features(
+        self,
+        schedules_df: pl.DataFrame,
+        game_id: str,
+        home_team: str,
+        away_team: str,
+    ) -> dict[str, float]:
+        """
+        Build win/loss streak features for both teams.
+
+        Streaks are powerful predictors - teams on hot/cold streaks
+        tend to continue performance trends.
+        """
+        features = {
+            "home_win_streak": 0.0,
+            "away_win_streak": 0.0,
+            "home_loss_streak": 0.0,
+            "away_loss_streak": 0.0,
+        }
+
+        if len(schedules_df) == 0:
+            return features
+
+        # Get current game info
+        current_game = schedules_df.filter(pl.col("game_id") == game_id)
+        if len(current_game) == 0:
+            return features
+
+        current_date = current_game["gameday"][0]
+        if current_date is None:
+            return features
+
+        # Calculate streaks for both teams
+        for team, prefix in [(home_team, "home"), (away_team, "away")]:
+            streak = self._calculate_team_streak(schedules_df, team, current_date)
+            if streak > 0:
+                features[f"{prefix}_win_streak"] = float(streak)
+            elif streak < 0:
+                features[f"{prefix}_loss_streak"] = float(abs(streak))
+
+        return features
+
+    def _calculate_team_streak(
+        self,
+        schedules_df: pl.DataFrame,
+        team: str,
+        before_date: datetime,
+    ) -> int:
+        """
+        Calculate current streak for a team.
+
+        Returns:
+            Positive integer for win streak, negative for loss streak, 0 for no streak.
+        """
+        # Get team's recent games (up to 10 for streak calculation)
+        team_games = (
+            schedules_df.filter(
+                ((pl.col("home_team") == team) | (pl.col("away_team") == team))
+                & (pl.col("gameday") < before_date)
+                & (pl.col("result").is_not_null())  # Only completed games
+            )
+            .sort("gameday", descending=True)
+            .head(10)
+        )
+
+        if len(team_games) == 0:
+            return 0
+
+        streak = 0
+        streak_type = None  # 'W' or 'L'
+
+        for row in team_games.iter_rows(named=True):
+            home = row.get("home_team")
+            result = row.get("result")  # Positive = home win
+
+            if result is None:
+                break
+
+            # Determine if team won this game
+            if home == team:
+                team_won = result > 0
+            else:
+                team_won = result < 0
+
+            if streak_type is None:
+                streak_type = "W" if team_won else "L"
+                streak = 1 if team_won else -1
+            elif team_won and streak_type == "W":
+                streak += 1
+            elif not team_won and streak_type == "L":
+                streak -= 1
+            else:
+                break  # Streak ended
+
+        return streak
+
+    def _build_situational_features(
+        self,
+        schedules_df: pl.DataFrame,
+        game_id: str,
+        home_team: str,
+        away_team: str,
+    ) -> dict[str, float]:
+        """
+        Build situational context features.
+
+        Includes:
+        - Week of season (fatigue indicator)
+        - Coming off bye week
+        """
+        features = {
+            "week_of_season": 1.0,
+            "home_coming_off_bye": 0.0,
+            "away_coming_off_bye": 0.0,
+        }
+
+        if len(schedules_df) == 0:
+            return features
+
+        # Get current game info
+        current_game = schedules_df.filter(pl.col("game_id") == game_id)
+        if len(current_game) == 0:
+            return features
+
+        # Extract week number
+        week = current_game["week"][0]
+        if week is not None:
+            features["week_of_season"] = float(week)
+
+        current_date = current_game["gameday"][0]
+        if current_date is None:
+            return features
+
+        # Check if coming off bye for each team
+        for team, prefix in [(home_team, "home"), (away_team, "away")]:
+            rest_days = self._get_rest_days(schedules_df, team, current_date)
+            # Bye week typically means 13+ days rest
+            if rest_days is not None and rest_days >= 13:
+                features[f"{prefix}_coming_off_bye"] = 1.0
+
+        return features
+
+    def _get_rest_days(
+        self,
+        schedules_df: pl.DataFrame,
+        team: str,
+        current_date: datetime,
+    ) -> Optional[int]:
+        """Get days since team's last game."""
+        prev_game = (
+            schedules_df.filter(
+                ((pl.col("home_team") == team) | (pl.col("away_team") == team))
+                & (pl.col("gameday") < current_date)
+            )
+            .sort("gameday", descending=True)
+            .head(1)
+        )
+
+        if len(prev_game) == 0:
+            return None
+
+        prev_date = prev_game["gameday"][0]
+        if prev_date is None or not isinstance(current_date, datetime) or not isinstance(prev_date, datetime):
+            return None
+
+        return (current_date - prev_date).days
 
 
 def get_division(team: str) -> Optional[str]:

@@ -209,32 +209,38 @@ class ValueDetector:
     def __init__(
         self,
         spread_model=None,
+        residual_spread_model=None,
         moneyline_model=None,
         totals_model=None,
         prop_models: Optional[dict] = None,
         min_edge: float = DEFAULT_MIN_EDGE,
         min_ev: float = DEFAULT_MIN_EV,
         remove_vig_in_comparison: bool = True,
+        prefer_residual_model: bool = True,
     ):
         """
         Initialize the value detector.
 
         Args:
             spread_model: Trained SpreadModel for game spread predictions
+            residual_spread_model: Trained ResidualSpreadModel for Vegas-adjusted predictions
             moneyline_model: Trained MoneylineModel for win probability predictions
             totals_model: Trained TotalsModel for over/under predictions
             prop_models: Dict mapping prop_type to trained prop models
             min_edge: Minimum edge required to flag as value (default 3%)
             min_ev: Minimum expected value required (default 2%)
             remove_vig_in_comparison: If True, compare to no-vig probabilities
+            prefer_residual_model: If True, use residual model for spreads when available
         """
         self.spread_model = spread_model
+        self.residual_spread_model = residual_spread_model
         self.moneyline_model = moneyline_model
         self.totals_model = totals_model
         self.prop_models = prop_models or {}
         self.min_edge = min_edge
         self.min_ev = min_ev
         self.remove_vig = remove_vig_in_comparison
+        self.prefer_residual_model = prefer_residual_model
 
     def scan_spreads(
         self,
@@ -312,6 +318,213 @@ class ValueDetector:
             value_bets=value_bets,
             games_scanned=len(games),
             total_opportunities=len(value_bets),
+        )
+
+    def scan_spreads_with_residual(
+        self,
+        games: list[dict],
+        odds_data: list[dict],
+        features: dict[str, dict],
+        context: Optional[dict[str, dict]] = None,
+    ) -> DetectionResult:
+        """
+        Scan spread bets using the ResidualSpreadModel for better edge detection.
+
+        The residual model predicts Vegas errors rather than spreads directly,
+        achieving better performance in specific situations:
+        - Early season games (weeks 1-4)
+        - Large spread games (10+ points)
+        - Close games (<3.5 points)
+
+        Args:
+            games: List of game dicts with game_id, home_team, away_team, game_time, week
+            odds_data: List of odds dicts with game_id, bookmaker, home_spread, home_odds, away_odds
+            features: Dict mapping game_id to feature dict
+            context: Optional dict mapping game_id to context dict with:
+                     week, home_rest, away_rest, temperature, wind_speed
+
+        Returns:
+            DetectionResult with detected value bets
+        """
+        if self.residual_spread_model is None:
+            logger.warning("No residual spread model configured, falling back to regular spread model")
+            return self.scan_spreads(games, odds_data, features)
+
+        value_bets = []
+        context = context or {}
+
+        for game in games:
+            game_id = game.get("game_id")
+            if not game_id:
+                continue
+
+            game_features = features.get(game_id)
+            if game_features is None:
+                logger.debug(f"No features for game {game_id}")
+                continue
+
+            # Find odds for this game
+            game_odds = [o for o in odds_data if o.get("game_id") == game_id]
+
+            for odds in game_odds:
+                vegas_spread = odds.get("home_spread", 0.0)
+                if vegas_spread is None:
+                    continue
+
+                # Get context for situational features
+                game_context = context.get(game_id, {})
+                week = game_context.get("week") or game.get("week")
+                home_rest = game_context.get("home_rest")
+                away_rest = game_context.get("away_rest")
+                temperature = game_context.get("temperature")
+                wind_speed = game_context.get("wind_speed")
+
+                # Get residual model prediction
+                try:
+                    prediction = self.residual_spread_model.predict_single(
+                        features=game_features,
+                        vegas_spread=vegas_spread,
+                        week=week,
+                        home_rest=home_rest,
+                        away_rest=away_rest,
+                        temperature=temperature,
+                        wind_speed=wind_speed,
+                    )
+                except Exception as e:
+                    logger.warning(f"Residual model failed for {game_id}: {e}")
+                    continue
+
+                # Check home spread
+                home_bet = self._evaluate_residual_spread_bet(
+                    prediction=prediction,
+                    game=game,
+                    odds=odds,
+                    side="home",
+                )
+                if home_bet:
+                    value_bets.append(home_bet)
+
+                # Check away spread
+                away_bet = self._evaluate_residual_spread_bet(
+                    prediction=prediction,
+                    game=game,
+                    odds=odds,
+                    side="away",
+                )
+                if away_bet:
+                    value_bets.append(away_bet)
+
+        # Sort by edge
+        value_bets.sort(key=lambda b: b.edge, reverse=True)
+
+        return DetectionResult(
+            value_bets=value_bets,
+            games_scanned=len(games),
+            total_opportunities=len(value_bets),
+        )
+
+    def _evaluate_residual_spread_bet(
+        self,
+        prediction,  # ResidualPrediction
+        game: dict,
+        odds: dict,
+        side: str,
+    ) -> Optional[ValueBet]:
+        """Evaluate a spread bet using residual model prediction."""
+        from nfl_bets.models.residual_spread_model import ResidualPrediction
+
+        game_id = game.get("game_id")
+        home_team = game.get("home_team", "")
+        away_team = game.get("away_team", "")
+        game_time = game.get("game_time")
+
+        bookmaker = odds.get("bookmaker", "Unknown")
+        vegas_spread = odds.get("home_spread", 0.0)
+        home_odds = odds.get("home_odds", -110)
+        away_odds = odds.get("away_odds", -110)
+
+        # Model's adjusted spread
+        model_spread = prediction.final_spread
+
+        # Calculate spread difference (how much model disagrees with Vegas)
+        spread_diff = abs(model_spread - vegas_spread)
+
+        # Convert spread difference to probability edge
+        # Rough conversion: 1 point difference ≈ 3% edge
+        # This is based on NFL spread distributions
+        POINTS_PER_PCT = 3.0
+
+        if side == "home":
+            line = vegas_spread
+            market_odds = home_odds
+            opp_odds = away_odds
+
+            # Home covers if actual spread > vegas_spread
+            # Model says home covers if model_spread > vegas_spread
+            if model_spread > vegas_spread:
+                model_prob = 0.5 + (spread_diff / POINTS_PER_PCT) / 100
+            else:
+                model_prob = 0.5 - (spread_diff / POINTS_PER_PCT) / 100
+
+            description = f"{home_team} {line:+.1f}"
+        else:
+            line = -vegas_spread
+            market_odds = away_odds
+            opp_odds = home_odds
+
+            # Away covers if actual spread < vegas_spread
+            # Model says away covers if model_spread < vegas_spread
+            if model_spread < vegas_spread:
+                model_prob = 0.5 + (spread_diff / POINTS_PER_PCT) / 100
+            else:
+                model_prob = 0.5 - (spread_diff / POINTS_PER_PCT) / 100
+
+            description = f"{away_team} {line:+.1f}"
+
+        # Clamp probability
+        model_prob = max(0.01, min(0.99, model_prob))
+
+        # Calculate edge
+        edge, ev, raw_edge = self._calculate_edge_and_ev(
+            model_prob=model_prob,
+            odds=market_odds,
+            opposite_odds=opp_odds,
+        )
+
+        # Check thresholds
+        if edge < self.min_edge or ev < self.min_ev:
+            return None
+
+        # Determine urgency (boost for situational edge)
+        urgency = self._determine_urgency(edge, game_time)
+
+        # Boost urgency if we have situational edge
+        if prediction.situational_edge in ("mid_early_season", "late_season", "close_game"):
+            if urgency == Urgency.MEDIUM:
+                urgency = Urgency.HIGH
+            elif urgency == Urgency.HIGH:
+                urgency = Urgency.CRITICAL
+
+        bet_id = f"{game_id}_{side}_spread_{bookmaker}_residual"
+
+        return ValueBet(
+            bet_id=bet_id,
+            bet_type=BetType.SPREAD,
+            game_id=game_id,
+            description=f"{description} [Residual: {prediction.situational_edge or 'general'}]",
+            model_probability=model_prob,
+            model_prediction=model_spread,
+            bookmaker=bookmaker,
+            odds=market_odds,
+            implied_probability=float(american_to_implied_probability(market_odds)),
+            line=line,
+            edge=edge,
+            expected_value=ev,
+            raw_edge=raw_edge,
+            urgency=urgency,
+            home_team=home_team,
+            away_team=away_team,
+            game_time=game_time,
         )
 
     def scan_moneylines(

@@ -91,6 +91,52 @@ class ModelManager:
             check_staleness=check_staleness,
         )
 
+    def load_residual_spread_model(
+        self,
+        version: str = "latest",
+        check_staleness: Optional[bool] = None,
+    ) -> "BaseModel":
+        """
+        Load the residual spread prediction model.
+
+        This model predicts Vegas errors rather than spreads directly,
+        achieving better performance in specific situations.
+
+        Args:
+            version: Model version or "latest" for most recent
+            check_staleness: Override auto_check_staleness setting
+
+        Returns:
+            Loaded ResidualSpreadModel
+        """
+        from .residual_spread_model import ResidualSpreadModel
+
+        # ResidualSpreadModel uses pickle not joblib
+        if version == "latest":
+            model_path = self.model_dir / "residual_spread_model_latest.pkl"
+        else:
+            model_path = self.model_dir / f"residual_spread_model_v{version}.pkl"
+
+        if not model_path.exists():
+            raise FileNotFoundError(
+                f"Residual spread model not found: {model_path}. "
+                f"Run training script with residual model enabled."
+            )
+
+        model = ResidualSpreadModel.load(model_path)
+
+        # Check staleness
+        should_check = check_staleness if check_staleness is not None else self.auto_check_staleness
+        if should_check and self._latest_game_date:
+            if self._is_model_stale(model):
+                self._warn_stale_model(model, "residual_spread_model")
+
+        # Cache loaded model
+        cache_key = f"residual_spread_model_{version}"
+        self._loaded_models[cache_key] = model
+
+        return model
+
     def load_moneyline_model(
         self,
         version: str = "latest",
@@ -260,7 +306,7 @@ class ModelManager:
         Check if a model type is stale.
 
         Args:
-            model_type: "spread", "moneyline", "totals", or prop type name
+            model_type: "spread", "residual_spread", "moneyline", "totals", or prop type name
 
         Returns:
             True if model is stale
@@ -268,6 +314,8 @@ class ModelManager:
         try:
             if model_type == "spread":
                 model = self.load_spread_model(check_staleness=False)
+            elif model_type == "residual_spread":
+                model = self.load_residual_spread_model(check_staleness=False)
             elif model_type == "moneyline":
                 model = self.load_moneyline_model(check_staleness=False)
             elif model_type == "totals":
@@ -284,7 +332,7 @@ class ModelManager:
         Get information about a trained model.
 
         Args:
-            model_type: "spread", "moneyline", "totals", or prop type name
+            model_type: "spread", "residual_spread", "moneyline", "totals", or prop type name
 
         Returns:
             Dictionary with model metadata
@@ -292,6 +340,8 @@ class ModelManager:
         try:
             if model_type == "spread":
                 model = self.load_spread_model(check_staleness=False)
+            elif model_type == "residual_spread":
+                model = self.load_residual_spread_model(check_staleness=False)
             elif model_type == "moneyline":
                 model = self.load_moneyline_model(check_staleness=False)
             elif model_type == "totals":

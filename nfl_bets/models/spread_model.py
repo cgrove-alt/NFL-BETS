@@ -10,6 +10,7 @@ The ensemble provides:
 - Better generalization through model diversity
 - Uncertainty estimates from model disagreement
 - Robust predictions across different game types
+- Optuna hyperparameter optimization for best performance
 """
 from dataclasses import dataclass
 from datetime import datetime
@@ -22,7 +23,17 @@ import polars as pl
 from loguru import logger
 from scipy import stats
 from sklearn.linear_model import Ridge
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, TimeSeriesSplit
+from sklearn.feature_selection import VarianceThreshold, SelectKBest, f_regression
+from sklearn.preprocessing import StandardScaler
+
+try:
+    import optuna
+    from optuna.samplers import TPESampler
+    HAS_OPTUNA = True
+except ImportError:
+    HAS_OPTUNA = False
+    optuna = None
 
 try:
     import xgboost as xgb
@@ -134,38 +145,40 @@ class SpreadModel(BaseModel):
         "ridge": 0.15,
     }
 
-    # Default XGBoost hyperparameters
+    # Default XGBoost hyperparameters (stronger regularization to prevent overfitting)
     XGB_PARAMS = {
-        "n_estimators": 500,
-        "max_depth": 6,
-        "learning_rate": 0.05,
-        "subsample": 0.8,
-        "colsample_bytree": 0.8,
-        "min_child_weight": 3,
-        "reg_alpha": 0.1,
-        "reg_lambda": 1.0,
+        "n_estimators": 300,          # Reduced from 500
+        "max_depth": 4,               # Reduced from 6 (shallower trees)
+        "learning_rate": 0.03,        # Reduced from 0.05 (slower learning)
+        "subsample": 0.7,             # Reduced from 0.8 (more regularization)
+        "colsample_bytree": 0.6,      # Reduced from 0.8 (more regularization)
+        "min_child_weight": 10,       # Increased from 3 (larger leaves)
+        "reg_alpha": 1.0,             # Increased from 0.1 (L1 regularization)
+        "reg_lambda": 5.0,            # Increased from 1.0 (L2 regularization)
+        "gamma": 0.1,                 # Added: min loss reduction for splits
         "random_state": 42,
         "n_jobs": -1,
     }
 
-    # Default LightGBM hyperparameters
+    # Default LightGBM hyperparameters (stronger regularization)
     LGB_PARAMS = {
-        "n_estimators": 500,
-        "max_depth": 6,
-        "learning_rate": 0.05,
-        "subsample": 0.8,
-        "colsample_bytree": 0.8,
-        "min_child_samples": 20,
-        "reg_alpha": 0.1,
-        "reg_lambda": 1.0,
+        "n_estimators": 300,          # Reduced from 500
+        "max_depth": 4,               # Reduced from 6
+        "learning_rate": 0.03,        # Reduced from 0.05
+        "subsample": 0.7,             # Reduced from 0.8
+        "colsample_bytree": 0.6,      # Reduced from 0.8
+        "min_child_samples": 50,      # Increased from 20 (larger leaves)
+        "reg_alpha": 1.0,             # Increased from 0.1
+        "reg_lambda": 5.0,            # Increased from 1.0
+        "min_split_gain": 0.1,        # Added: min gain for splits
         "random_state": 42,
         "n_jobs": -1,
         "verbose": -1,
     }
 
-    # Default Ridge hyperparameters
+    # Default Ridge hyperparameters (stronger regularization)
     RIDGE_PARAMS = {
-        "alpha": 1.0,
+        "alpha": 10.0,                # Increased from 1.0
     }
 
     def __init__(
@@ -175,6 +188,8 @@ class SpreadModel(BaseModel):
         lgb_params: Optional[dict] = None,
         ridge_params: Optional[dict] = None,
         use_calibration: bool = True,
+        use_feature_selection: bool = True,
+        max_features: int = 50,
     ):
         """
         Initialize the spread model.
@@ -185,11 +200,15 @@ class SpreadModel(BaseModel):
             lgb_params: LightGBM hyperparameters
             ridge_params: Ridge regression hyperparameters
             use_calibration: Whether to calibrate probabilities
+            use_feature_selection: Whether to apply feature selection
+            max_features: Maximum number of features to keep after selection
         """
         super().__init__()
 
         self.weights = ensemble_weights or self.DEFAULT_WEIGHTS.copy()
         self.use_calibration = use_calibration
+        self.use_feature_selection = use_feature_selection
+        self.max_features = max_features
 
         # Normalize weights
         total = sum(self.weights.values())
@@ -207,6 +226,13 @@ class SpreadModel(BaseModel):
 
         # Calibrator for cover probabilities
         self.calibrator: Optional[ProbabilityCalibrator] = None
+
+        # Feature selection components
+        self.variance_selector: Optional[VarianceThreshold] = None
+        self.k_best_selector: Optional[SelectKBest] = None
+        self.scaler: Optional[StandardScaler] = None
+        self.selected_feature_indices: Optional[np.ndarray] = None
+        self.selected_feature_names: Optional[list[str]] = None
 
         # Track prediction uncertainty
         self._residual_std: float = 10.0  # Default NFL spread std
@@ -237,7 +263,12 @@ class SpreadModel(BaseModel):
         X_arr = self._prepare_features(X)
         y_arr = y.to_numpy() if isinstance(y, pl.Series) else np.asarray(y)
 
-        self.logger.info(f"Training spread model on {len(y_arr)} samples")
+        self.logger.info(f"Training spread model on {len(y_arr)} samples, {X_arr.shape[1]} features")
+
+        # Apply feature selection if enabled
+        if self.use_feature_selection:
+            X_arr = self._fit_feature_selection(X_arr, y_arr)
+            self.logger.info(f"After feature selection: {X_arr.shape[1]} features retained")
 
         # Split for validation if not provided
         if validation_data is None:
@@ -246,7 +277,12 @@ class SpreadModel(BaseModel):
             )
         else:
             X_train, y_train = X_arr, y_arr
-            X_val = self._prepare_features(validation_data[0])
+            X_val_raw = self._prepare_features(validation_data[0])
+            # Apply same feature selection to validation data
+            if self.use_feature_selection:
+                X_val = self._apply_feature_selection(X_val_raw)
+            else:
+                X_val = X_val_raw
             y_val = (
                 validation_data[1].to_numpy()
                 if isinstance(validation_data[1], pl.Series)
@@ -310,6 +346,111 @@ class SpreadModel(BaseModel):
 
         self.logger.info("Spread model training complete")
         return self
+
+    def _fit_feature_selection(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Fit and apply feature selection pipeline.
+
+        Steps:
+        1. Remove zero-variance features (useless for prediction)
+        2. Select top K features by F-regression score
+        3. Track selected feature indices for prediction time
+
+        Args:
+            X: Feature matrix
+            y: Target values
+
+        Returns:
+            Reduced feature matrix
+        """
+        original_n_features = X.shape[1]
+
+        # Handle NaN/Inf values
+        X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Step 1: Remove zero-variance features
+        self.variance_selector = VarianceThreshold(threshold=1e-10)
+        try:
+            X_var = self.variance_selector.fit_transform(X)
+            variance_mask = self.variance_selector.get_support()
+        except Exception as e:
+            self.logger.warning(f"Variance threshold failed: {e}, skipping")
+            X_var = X
+            variance_mask = np.ones(X.shape[1], dtype=bool)
+
+        self.logger.debug(
+            f"Variance filter: {original_n_features} -> {X_var.shape[1]} features"
+        )
+
+        # Step 2: Select top K features by F-regression score
+        k = min(self.max_features, X_var.shape[1])
+        if k < X_var.shape[1]:
+            self.k_best_selector = SelectKBest(f_regression, k=k)
+            try:
+                X_selected = self.k_best_selector.fit_transform(X_var, y)
+                k_best_mask = self.k_best_selector.get_support()
+            except Exception as e:
+                self.logger.warning(f"SelectKBest failed: {e}, skipping")
+                X_selected = X_var
+                k_best_mask = np.ones(X_var.shape[1], dtype=bool)
+        else:
+            X_selected = X_var
+            k_best_mask = np.ones(X_var.shape[1], dtype=bool)
+
+        self.logger.debug(
+            f"K-best selection: {X_var.shape[1]} -> {X_selected.shape[1]} features"
+        )
+
+        # Track which original features were selected
+        variance_indices = np.where(variance_mask)[0]
+        k_best_indices = np.where(k_best_mask)[0]
+        self.selected_feature_indices = variance_indices[k_best_indices]
+
+        # Update selected feature names if available
+        if self.feature_names is not None and len(self.feature_names) > 0:
+            all_names = list(self.feature_names)
+            self.selected_feature_names = [
+                all_names[i] for i in self.selected_feature_indices
+            ]
+            self.logger.debug(f"Selected features: {self.selected_feature_names[:10]}...")
+
+        return X_selected
+
+    def _apply_feature_selection(
+        self,
+        X: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Apply fitted feature selection to new data.
+
+        Args:
+            X: Feature matrix
+
+        Returns:
+            Reduced feature matrix
+        """
+        # Handle NaN/Inf values
+        X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Apply variance selector
+        if self.variance_selector is not None:
+            try:
+                X = self.variance_selector.transform(X)
+            except Exception as e:
+                self.logger.warning(f"Variance transform failed: {e}")
+
+        # Apply k-best selector
+        if self.k_best_selector is not None:
+            try:
+                X = self.k_best_selector.transform(X)
+            except Exception as e:
+                self.logger.warning(f"K-best transform failed: {e}")
+
+        return X
 
     def _train_xgb(
         self,
@@ -458,6 +599,9 @@ class SpreadModel(BaseModel):
         """
         self._validate_fitted()
         X_arr = self._prepare_features(X)
+        # Apply feature selection if enabled
+        if self.use_feature_selection and self.variance_selector is not None:
+            X_arr = self._apply_feature_selection(X_arr)
         return self._ensemble_predict(X_arr)
 
     def predict_proba(
@@ -477,6 +621,9 @@ class SpreadModel(BaseModel):
         """
         self._validate_fitted()
         X_arr = self._prepare_features(X)
+        # Apply feature selection if enabled
+        if self.use_feature_selection and self.variance_selector is not None:
+            X_arr = self._apply_feature_selection(X_arr)
 
         predictions = self._ensemble_predict(X_arr)
 
@@ -510,6 +657,9 @@ class SpreadModel(BaseModel):
         """
         self._validate_fitted()
         X_arr = self._prepare_features(X)
+        # Apply feature selection if enabled
+        if self.use_feature_selection and self.variance_selector is not None:
+            X_arr = self._apply_feature_selection(X_arr)
 
         # Get ensemble prediction
         predictions = self._ensemble_predict(X_arr)
@@ -634,6 +784,228 @@ class SpreadModel(BaseModel):
 
         # Sort by importance
         return dict(sorted(importance.items(), key=lambda x: x[1], reverse=True))
+
+    @classmethod
+    def optimize_hyperparameters(
+        cls,
+        X: Union[pl.DataFrame, np.ndarray],
+        y: Union[pl.Series, np.ndarray],
+        n_trials: int = 50,
+        n_cv_splits: int = 5,
+        timeout: Optional[int] = None,
+        study_name: str = "spread_model_optimization",
+    ) -> tuple["SpreadModel", dict[str, Any]]:
+        """
+        Optimize hyperparameters using Optuna with time-series cross-validation.
+
+        Uses TPE (Tree-structured Parzen Estimator) sampler for efficient
+        hyperparameter search. Time-series CV ensures no look-ahead bias.
+
+        Args:
+            X: Feature matrix
+            y: Target values
+            n_trials: Number of optimization trials
+            n_cv_splits: Number of time-series CV splits
+            timeout: Optional timeout in seconds
+            study_name: Name for the Optuna study
+
+        Returns:
+            Tuple of (optimized model, best hyperparameters)
+        """
+        if not HAS_OPTUNA:
+            raise ImportError("Optuna is required for hyperparameter optimization. pip install optuna")
+
+        # Prepare data
+        if isinstance(X, pl.DataFrame):
+            X_arr = X.to_numpy()
+            feature_names = X.columns
+        else:
+            X_arr = np.asarray(X)
+            feature_names = None
+
+        y_arr = y.to_numpy() if isinstance(y, pl.Series) else np.asarray(y)
+
+        logger.info(f"Starting Optuna optimization with {n_trials} trials")
+
+        def objective(trial: optuna.Trial) -> float:
+            """Objective function for Optuna optimization."""
+            # XGBoost hyperparameters
+            xgb_params = {
+                "n_estimators": trial.suggest_int("xgb_n_estimators", 100, 1000),
+                "max_depth": trial.suggest_int("xgb_max_depth", 3, 10),
+                "learning_rate": trial.suggest_float("xgb_learning_rate", 0.01, 0.3, log=True),
+                "subsample": trial.suggest_float("xgb_subsample", 0.5, 1.0),
+                "colsample_bytree": trial.suggest_float("xgb_colsample_bytree", 0.5, 1.0),
+                "min_child_weight": trial.suggest_int("xgb_min_child_weight", 1, 10),
+                "reg_alpha": trial.suggest_float("xgb_reg_alpha", 1e-3, 10.0, log=True),
+                "reg_lambda": trial.suggest_float("xgb_reg_lambda", 1e-3, 10.0, log=True),
+                "random_state": 42,
+                "n_jobs": -1,
+            }
+
+            # LightGBM hyperparameters
+            lgb_params = {
+                "n_estimators": trial.suggest_int("lgb_n_estimators", 100, 1000),
+                "max_depth": trial.suggest_int("lgb_max_depth", 3, 10),
+                "learning_rate": trial.suggest_float("lgb_learning_rate", 0.01, 0.3, log=True),
+                "subsample": trial.suggest_float("lgb_subsample", 0.5, 1.0),
+                "colsample_bytree": trial.suggest_float("lgb_colsample_bytree", 0.5, 1.0),
+                "min_child_samples": trial.suggest_int("lgb_min_child_samples", 5, 50),
+                "reg_alpha": trial.suggest_float("lgb_reg_alpha", 1e-3, 10.0, log=True),
+                "reg_lambda": trial.suggest_float("lgb_reg_lambda", 1e-3, 10.0, log=True),
+                "random_state": 42,
+                "n_jobs": -1,
+                "verbose": -1,
+            }
+
+            # Ridge hyperparameters
+            ridge_params = {
+                "alpha": trial.suggest_float("ridge_alpha", 0.01, 100.0, log=True),
+            }
+
+            # Ensemble weights
+            xgb_weight = trial.suggest_float("xgb_weight", 0.2, 0.7)
+            lgb_weight = trial.suggest_float("lgb_weight", 0.1, 0.5)
+            ridge_weight = 1.0 - xgb_weight - lgb_weight
+            if ridge_weight < 0.05:
+                return float("inf")  # Invalid weight combination
+
+            weights = {
+                "xgb": xgb_weight,
+                "lgb": lgb_weight,
+                "ridge": ridge_weight,
+            }
+
+            # Time-series cross-validation
+            tscv = TimeSeriesSplit(n_splits=n_cv_splits)
+            cv_scores = []
+
+            for train_idx, val_idx in tscv.split(X_arr):
+                X_train, X_val = X_arr[train_idx], X_arr[val_idx]
+                y_train, y_val = y_arr[train_idx], y_arr[val_idx]
+
+                # Create and train model
+                model = cls(
+                    ensemble_weights=weights,
+                    xgb_params=xgb_params,
+                    lgb_params=lgb_params,
+                    ridge_params=ridge_params,
+                    use_calibration=False,  # Skip calibration during CV
+                )
+
+                try:
+                    model.train(
+                        X_train, y_train,
+                        validation_data=(X_val, y_val),
+                        early_stopping_rounds=30,
+                        fit_calibrator=False,
+                    )
+
+                    # Calculate MAE on validation
+                    preds = model.predict(X_val)
+                    mae = np.mean(np.abs(y_val - preds))
+                    cv_scores.append(mae)
+
+                except Exception as e:
+                    logger.warning(f"Trial failed: {e}")
+                    return float("inf")
+
+            mean_mae = np.mean(cv_scores)
+            trial.set_user_attr("cv_scores", cv_scores)
+
+            return mean_mae
+
+        # Create study with TPE sampler
+        sampler = TPESampler(seed=42)
+        study = optuna.create_study(
+            study_name=study_name,
+            direction="minimize",
+            sampler=sampler,
+        )
+
+        # Optimize
+        study.optimize(
+            objective,
+            n_trials=n_trials,
+            timeout=timeout,
+            show_progress_bar=True,
+        )
+
+        # Extract best parameters
+        best_params = study.best_params
+        best_mae = study.best_value
+
+        logger.info(f"Best MAE: {best_mae:.3f}")
+        logger.info(f"Best params: {best_params}")
+
+        # Build final model with best parameters
+        xgb_params = {
+            "n_estimators": best_params["xgb_n_estimators"],
+            "max_depth": best_params["xgb_max_depth"],
+            "learning_rate": best_params["xgb_learning_rate"],
+            "subsample": best_params["xgb_subsample"],
+            "colsample_bytree": best_params["xgb_colsample_bytree"],
+            "min_child_weight": best_params["xgb_min_child_weight"],
+            "reg_alpha": best_params["xgb_reg_alpha"],
+            "reg_lambda": best_params["xgb_reg_lambda"],
+            "random_state": 42,
+            "n_jobs": -1,
+        }
+
+        lgb_params = {
+            "n_estimators": best_params["lgb_n_estimators"],
+            "max_depth": best_params["lgb_max_depth"],
+            "learning_rate": best_params["lgb_learning_rate"],
+            "subsample": best_params["lgb_subsample"],
+            "colsample_bytree": best_params["lgb_colsample_bytree"],
+            "min_child_samples": best_params["lgb_min_child_samples"],
+            "reg_alpha": best_params["lgb_reg_alpha"],
+            "reg_lambda": best_params["lgb_reg_lambda"],
+            "random_state": 42,
+            "n_jobs": -1,
+            "verbose": -1,
+        }
+
+        ridge_params = {
+            "alpha": best_params["ridge_alpha"],
+        }
+
+        weights = {
+            "xgb": best_params["xgb_weight"],
+            "lgb": best_params["lgb_weight"],
+            "ridge": 1.0 - best_params["xgb_weight"] - best_params["lgb_weight"],
+        }
+
+        # Train final model on all data
+        final_model = cls(
+            ensemble_weights=weights,
+            xgb_params=xgb_params,
+            lgb_params=lgb_params,
+            ridge_params=ridge_params,
+            use_calibration=True,
+        )
+
+        # Split for final training
+        X_train, X_val, y_train, y_val = train_test_split(
+            X_arr, y_arr, test_size=0.2, random_state=42
+        )
+
+        final_model.train(
+            X_train, y_train,
+            validation_data=(X_val, y_val),
+            early_stopping_rounds=50,
+            fit_calibrator=True,
+        )
+
+        if feature_names is not None:
+            final_model.feature_names = list(feature_names)
+
+        return final_model, {
+            "best_params": best_params,
+            "best_mae": best_mae,
+            "n_trials": n_trials,
+            "study_name": study_name,
+        }
 
     def save(self, path: Union[str, Path]) -> None:
         """Save the complete model to disk."""
