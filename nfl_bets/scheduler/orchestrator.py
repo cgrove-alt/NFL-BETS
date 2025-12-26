@@ -153,13 +153,21 @@ class SchedulerOrchestrator:
             replace_existing=True,
         )
 
-        # Auto-retrain job - runs 30 min after model refresh check
+        # Auto-retrain job - runs weekly on Tuesday at 6:30 AM ET
+        # Tuesday is optimal because:
+        # - Monday Night Football data is available
+        # - All previous week's games are processed
+        # - Gives time before Thursday Night Football
         if sched_settings.auto_retrain_on_stale:
             self.scheduler.add_job(
                 self._auto_retrain_job,
-                trigger=CronTrigger(hour=sched_settings.model_refresh_hour, minute=30),
+                trigger=CronTrigger(
+                    day_of_week="tue",  # Tuesday
+                    hour=sched_settings.model_refresh_hour,
+                    minute=30,
+                ),
                 id="auto_retrain",
-                name="Auto-Retrain Stale Models",
+                name="Weekly Model Retrain (Tuesday)",
                 replace_existing=True,
             )
 
@@ -398,15 +406,53 @@ class SchedulerOrchestrator:
 
         if result.get("status") == "success":
             logger.info("Auto-retrain completed successfully")
-            # Reload models after retraining
-            try:
-                spread_model = self.model_manager.load_spread_model()
-                self.value_detector.spread_model = spread_model
-                logger.info("Spread model reloaded")
-            except Exception as e:
-                logger.error(f"Failed to reload model after retrain: {e}")
+            # Reload ALL models after retraining
+            self._reload_all_models()
         else:
             logger.error(f"Auto-retrain failed: {result.get('error')}")
+
+    def _reload_all_models(self) -> None:
+        """Reload all 7 models after retraining."""
+        logger.info("Reloading all models after retraining...")
+
+        # Clear model cache first
+        self.model_manager.clear_cache()
+
+        # Reload spread model
+        try:
+            spread_model = self.model_manager.load_spread_model()
+            self.value_detector.spread_model = spread_model
+            logger.info("✓ Spread model reloaded")
+        except Exception as e:
+            logger.error(f"Failed to reload spread model: {e}")
+
+        # Reload moneyline model
+        try:
+            moneyline_model = self.model_manager.load_moneyline_model()
+            self.value_detector.moneyline_model = moneyline_model
+            logger.info("✓ Moneyline model reloaded")
+        except Exception as e:
+            logger.error(f"Failed to reload moneyline model: {e}")
+
+        # Reload totals model
+        try:
+            totals_model = self.model_manager.load_totals_model()
+            self.value_detector.totals_model = totals_model
+            logger.info("✓ Totals model reloaded")
+        except Exception as e:
+            logger.error(f"Failed to reload totals model: {e}")
+
+        # Reload all prop models
+        prop_types = ["passing_yards", "rushing_yards", "receiving_yards", "receptions"]
+        for prop_type in prop_types:
+            try:
+                prop_model = self.model_manager.load_prop_model(prop_type)
+                self.value_detector.prop_models[prop_type] = prop_model
+                logger.info(f"✓ {prop_type} model reloaded")
+            except Exception as e:
+                logger.error(f"Failed to reload {prop_type} model: {e}")
+
+        logger.info("Model reload complete")
 
     def _on_job_executed(self, event: JobExecutionEvent) -> None:
         """Handle successful job execution."""
