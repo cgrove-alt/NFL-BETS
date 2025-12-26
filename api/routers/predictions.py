@@ -334,6 +334,10 @@ async def get_all_predictions(
 
     # Generate predictions for each game
     game_predictions = []
+    total_players_processed = 0
+    total_players_found = 0
+
+    logger.info(f"Generating predictions for {len(games)} games")
 
     for game in games:
         gid = game.get("game_id", "")
@@ -381,18 +385,23 @@ async def get_all_predictions(
                 position = player_info.get("position", "")
                 injury_status = player_info.get("injury_status", "ACTIVE")
                 prop_types = _get_prop_type_for_position(position)
+                total_players_processed += 1
 
                 # Look up the real nflverse player_id from name
+                logger.info(f"Looking up player ID for: {player_name} (season={season}, pos={position})")
                 player_id = await app_state.feature_pipeline.lookup_player_id(
                     player_name=player_name,
                     season=season,
                     position=position,
                 )
 
-                # Skip if player not found in PBP data
+                # Skip if player not found
                 if not player_id:
-                    logger.debug(f"Player ID not found for {player_name}, skipping")
+                    logger.warning(f"Player ID NOT FOUND for {player_name} (season={season}) - skipping this player")
                     continue
+
+                logger.info(f"Found player ID for {player_name}: {player_id}")
+                total_players_found += 1
 
                 for prop_type in prop_types:
                     # Check if we have this prop model
@@ -462,6 +471,8 @@ async def get_all_predictions(
                 player_props=player_preds,
             )
         )
+
+    logger.info(f"Prediction summary: {total_players_processed} players processed, {total_players_found} IDs found, {sum(len(g.player_props) for g in game_predictions)} predictions generated")
 
     return {
         "count": len(game_predictions),

@@ -247,7 +247,9 @@ class FeaturePipeline:
         position: Optional[str] = None,
     ) -> Optional[str]:
         """
-        Look up nflverse player_id from player name using PBP data.
+        Look up nflverse player_id from player name.
+
+        Uses roster data as primary source (fast, reliable), falls back to PBP.
 
         Args:
             player_name: Player's display name (e.g., "Patrick Mahomes")
@@ -255,20 +257,112 @@ class FeaturePipeline:
             position: Optional position hint (QB, RB, WR, TE)
 
         Returns:
-            Player ID if found, None otherwise
+            Player ID (gsis_id) if found, None otherwise
         """
         if not self.data_pipeline:
             return None
 
         try:
-            pbp_df = await self.data_pipeline.get_historical_pbp([season])
+            # Try roster data first - fast and reliable
+            seasons_to_try = [season, season - 1, season - 2]
+            name_lower = player_name.lower().strip()
+            parts = player_name.strip().split()
+
+            for s in seasons_to_try:
+                try:
+                    roster_df = await self.data_pipeline.get_rosters([s])
+                    if roster_df is None or len(roster_df) == 0:
+                        continue
+
+                    # Check required columns exist
+                    if "full_name" not in roster_df.columns or "gsis_id" not in roster_df.columns:
+                        self.logger.debug(f"Roster missing required columns for season {s}")
+                        continue
+
+                    # Try exact match on full_name
+                    matches = roster_df.filter(
+                        pl.col("full_name").str.to_lowercase() == name_lower
+                    )
+                    if len(matches) > 0:
+                        gsis_id = matches["gsis_id"][0]
+                        if gsis_id:
+                            self.logger.debug(f"Found {player_name} via roster exact match: {gsis_id}")
+                            return gsis_id
+
+                    # Try partial match (last name + position)
+                    if len(parts) >= 2:
+                        last_name = parts[-1].lower()
+                        matches = roster_df.filter(
+                            pl.col("full_name").str.to_lowercase().str.ends_with(last_name)
+                        )
+                        # Filter by position if provided
+                        if position and "position" in roster_df.columns and len(matches) > 1:
+                            pos_matches = matches.filter(pl.col("position") == position.upper())
+                            if len(pos_matches) > 0:
+                                matches = pos_matches
+
+                        if len(matches) == 1:
+                            gsis_id = matches["gsis_id"][0]
+                            if gsis_id:
+                                self.logger.debug(f"Found {player_name} via roster partial match: {gsis_id}")
+                                return gsis_id
+
+                        # If multiple matches and first name initial matches, use that
+                        if len(matches) > 1 and len(parts) >= 2:
+                            first_initial = parts[0][0].lower()
+                            for row in matches.iter_rows(named=True):
+                                full = row.get("full_name", "").lower()
+                                if full.startswith(first_initial):
+                                    gsis_id = row.get("gsis_id")
+                                    if gsis_id:
+                                        self.logger.debug(f"Found {player_name} via initial match: {gsis_id}")
+                                        return gsis_id
+
+                except Exception as e:
+                    self.logger.debug(f"Roster lookup failed for season {s}: {e}")
+                    continue
+
+            # Fall back to PBP if roster fails
+            self.logger.debug(f"Roster lookup failed for {player_name}, trying PBP fallback")
+            return await self._lookup_player_id_from_pbp(player_name, season, position)
+
+        except Exception as e:
+            self.logger.warning(f"Player lookup failed for {player_name}: {e}")
+            return None
+
+    async def _lookup_player_id_from_pbp(
+        self,
+        player_name: str,
+        season: int,
+        position: Optional[str] = None,
+    ) -> Optional[str]:
+        """
+        Fallback: Look up player_id from PBP data.
+
+        This is slower but works for players who might not be in roster data.
+        """
+        if not self.data_pipeline:
+            return None
+
+        try:
+            # Try multiple seasons for PBP data
+            seasons_to_try = [season, season - 1, season - 2]
+            pbp_df = None
+
+            for s in seasons_to_try:
+                try:
+                    pbp_df = await self.data_pipeline.get_historical_pbp([s])
+                    if pbp_df is not None and len(pbp_df) > 0:
+                        break
+                except Exception:
+                    continue
+
             if pbp_df is None or len(pbp_df) == 0:
                 return None
 
             # Convert full name to abbreviated format (e.g., "Patrick Mahomes" -> "P.Mahomes")
             parts = player_name.strip().split()
             if len(parts) >= 2:
-                # Try abbreviated format: "P.Mahomes"
                 abbrev_name = f"{parts[0][0]}.{parts[-1]}"
             else:
                 abbrev_name = player_name
@@ -276,7 +370,6 @@ class FeaturePipeline:
             name_lower = abbrev_name.lower()
             full_name_lower = player_name.lower().strip()
 
-            # Helper to try matching with both abbreviated and full name
             def try_match(df: pl.DataFrame, name_col: str, id_col: str) -> Optional[str]:
                 if name_col not in df.columns or id_col not in df.columns:
                     return None
@@ -286,7 +379,7 @@ class FeaturePipeline:
                 ).select(id_col).unique()
                 if len(matches) > 0 and matches[id_col][0] is not None:
                     return matches[id_col][0]
-                # Try full name as fallback
+                # Try full name
                 matches = df.filter(
                     pl.col(name_col).str.to_lowercase() == full_name_lower
                 ).select(id_col).unique()
@@ -301,23 +394,21 @@ class FeaturePipeline:
                     return matches[id_col][0]
                 return None
 
-            # Search in different columns based on position
+            # Search based on position
             if position == "QB":
                 result = try_match(pbp_df, "passer_player_name", "passer_id")
                 if result:
                     return result
-
             elif position == "RB":
                 result = try_match(pbp_df, "rusher_player_name", "rusher_id")
                 if result:
                     return result
-
             elif position in ("WR", "TE"):
                 result = try_match(pbp_df, "receiver_player_name", "receiver_id")
                 if result:
                     return result
 
-            # If no position hint or not found, try all columns
+            # Try all columns
             for id_col, name_col in [
                 ("passer_id", "passer_player_name"),
                 ("receiver_id", "receiver_player_name"),
@@ -327,11 +418,11 @@ class FeaturePipeline:
                 if result:
                     return result
 
-            self.logger.debug(f"Player ID not found for: {player_name}")
+            self.logger.debug(f"Player ID not found in PBP for: {player_name}")
             return None
 
         except Exception as e:
-            self.logger.warning(f"Error looking up player ID for {player_name}: {e}")
+            self.logger.warning(f"PBP lookup failed for {player_name}: {e}")
             return None
 
     async def build_spread_features(
@@ -437,9 +528,18 @@ class FeaturePipeline:
         """
         self.logger.debug(f"Building prop features: {player_name} - {prop_type}")
 
-        # Fetch data if not provided
+        # Fetch data if not provided - try multiple seasons for reliability
         if pbp_df is None and self.data_pipeline:
-            pbp_df = await self.data_pipeline.get_historical_pbp([season])
+            seasons_to_try = [season, season - 1, season - 2]
+            for s in seasons_to_try:
+                try:
+                    pbp_df = await self.data_pipeline.get_historical_pbp([s])
+                    if pbp_df is not None and len(pbp_df) > 0:
+                        self.logger.debug(f"Loaded PBP data from season {s} for prop features")
+                        break
+                except Exception as e:
+                    self.logger.debug(f"Failed to load PBP for season {s}: {e}")
+                    continue
 
         features = {}
 
