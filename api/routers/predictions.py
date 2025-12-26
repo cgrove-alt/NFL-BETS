@@ -459,33 +459,22 @@ async def _fetch_draftkings_spread(
     if not hasattr(app_state, 'pipeline') or not app_state.pipeline:
         return None
 
-    odds_api = getattr(app_state.pipeline, 'odds_api', None)
-    if not odds_api:
-        return None
-
     try:
-        # Get Odds API events to find event_id for this game
-        events = await odds_api.get_events()
-        if not events:
+        # Get odds data from pipeline (includes spreads)
+        odds_data = await app_state.pipeline.get_game_odds(markets=["spreads"])
+        if not odds_data:
+            logger.debug("No odds data available from pipeline")
             return None
 
         # Find the event matching our game
-        event_id = None
-        for event in events:
+        for event in odds_data:
             event_home = TEAM_NAME_MAP.get(event.get("home_team", ""), "")
             event_away = TEAM_NAME_MAP.get(event.get("away_team", ""), "")
-            if event_home == home_team and event_away == away_team:
-                event_id = event.get("id")
-                break
 
-        if not event_id:
-            return None
-
-        # Get odds for this event (spreads are included in the event data)
-        for event in events:
-            if event.get("id") != event_id:
+            if event_home != home_team or event_away != away_team:
                 continue
 
+            # Found the game - look for DraftKings spread
             for bookmaker in event.get("bookmakers", []):
                 if bookmaker.get("key") != "draftkings":
                     continue
@@ -508,14 +497,17 @@ async def _fetch_draftkings_spread(
                             away_odds = outcome.get("price")
 
                     if home_spread is not None:
+                        logger.debug(f"Found DK spread for {away_team}@{home_team}: {home_spread}")
                         return {
                             "line": home_spread,
                             "home_odds": home_odds,
                             "away_odds": away_odds,
                         }
 
+        logger.debug(f"No DK spread found for {away_team}@{home_team}")
+
     except Exception as e:
-        logger.debug(f"Failed to fetch DraftKings spread: {e}")
+        logger.warning(f"Failed to fetch DraftKings spread: {e}")
 
     return None
 
