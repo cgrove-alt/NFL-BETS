@@ -222,33 +222,57 @@ class FeaturePipeline:
             if pbp_df is None or len(pbp_df) == 0:
                 return None
 
-            # Normalize name for matching
-            name_lower = player_name.lower().strip()
+            # Convert full name to abbreviated format (e.g., "Patrick Mahomes" -> "P.Mahomes")
+            parts = player_name.strip().split()
+            if len(parts) >= 2:
+                # Try abbreviated format: "P.Mahomes"
+                abbrev_name = f"{parts[0][0]}.{parts[-1]}"
+            else:
+                abbrev_name = player_name
+
+            name_lower = abbrev_name.lower()
+            full_name_lower = player_name.lower().strip()
+
+            # Helper to try matching with both abbreviated and full name
+            def try_match(df: pl.DataFrame, name_col: str, id_col: str) -> Optional[str]:
+                if name_col not in df.columns or id_col not in df.columns:
+                    return None
+                # Try abbreviated name first (P.Mahomes)
+                matches = df.filter(
+                    pl.col(name_col).str.to_lowercase() == name_lower
+                ).select(id_col).unique()
+                if len(matches) > 0 and matches[id_col][0] is not None:
+                    return matches[id_col][0]
+                # Try full name as fallback
+                matches = df.filter(
+                    pl.col(name_col).str.to_lowercase() == full_name_lower
+                ).select(id_col).unique()
+                if len(matches) > 0 and matches[id_col][0] is not None:
+                    return matches[id_col][0]
+                # Try partial match on last name
+                last_name = parts[-1].lower() if len(parts) >= 2 else player_name.lower()
+                matches = df.filter(
+                    pl.col(name_col).str.to_lowercase().str.ends_with(last_name)
+                ).select(id_col).unique()
+                if len(matches) == 1 and matches[id_col][0] is not None:
+                    return matches[id_col][0]
+                return None
 
             # Search in different columns based on position
             if position == "QB":
-                # Search passer columns
-                matches = pbp_df.filter(
-                    pl.col("passer_player_name").str.to_lowercase() == name_lower
-                ).select("passer_id").unique()
-                if len(matches) > 0:
-                    return matches["passer_id"][0]
+                result = try_match(pbp_df, "passer_player_name", "passer_id")
+                if result:
+                    return result
 
             elif position == "RB":
-                # Search rusher columns
-                matches = pbp_df.filter(
-                    pl.col("rusher_player_name").str.to_lowercase() == name_lower
-                ).select("rusher_id").unique()
-                if len(matches) > 0:
-                    return matches["rusher_id"][0]
+                result = try_match(pbp_df, "rusher_player_name", "rusher_id")
+                if result:
+                    return result
 
             elif position in ("WR", "TE"):
-                # Search receiver columns
-                matches = pbp_df.filter(
-                    pl.col("receiver_player_name").str.to_lowercase() == name_lower
-                ).select("receiver_id").unique()
-                if len(matches) > 0:
-                    return matches["receiver_id"][0]
+                result = try_match(pbp_df, "receiver_player_name", "receiver_id")
+                if result:
+                    return result
 
             # If no position hint or not found, try all columns
             for id_col, name_col in [
@@ -256,14 +280,9 @@ class FeaturePipeline:
                 ("receiver_id", "receiver_player_name"),
                 ("rusher_id", "rusher_player_name"),
             ]:
-                if name_col in pbp_df.columns and id_col in pbp_df.columns:
-                    matches = pbp_df.filter(
-                        pl.col(name_col).str.to_lowercase() == name_lower
-                    ).select(id_col).unique()
-                    if len(matches) > 0:
-                        player_id = matches[id_col][0]
-                        if player_id is not None:
-                            return player_id
+                result = try_match(pbp_df, name_col, id_col)
+                if result:
+                    return result
 
             self.logger.debug(f"Player ID not found for: {player_name}")
             return None
