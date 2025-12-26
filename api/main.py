@@ -21,7 +21,7 @@ from typing import Any, Optional
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routers import health, value_bets, bankroll, models, jobs, analytics, games
+from api.routers import health, value_bets, bankroll, models, jobs, analytics, games, predictions
 from api.state import AppState
 
 logger = logging.getLogger(__name__)
@@ -82,6 +82,7 @@ app.include_router(models.router, prefix="/api", tags=["Models"])
 app.include_router(jobs.router, prefix="/api", tags=["Jobs"])
 app.include_router(analytics.router, prefix="/api", tags=["Analytics"])
 app.include_router(games.router, prefix="/api", tags=["Games"])
+app.include_router(predictions.router, prefix="/api", tags=["Predictions"])
 
 
 @app.get("/")
