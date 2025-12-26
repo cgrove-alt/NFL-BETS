@@ -59,9 +59,13 @@ class AppState:
             await self.pipeline.initialize()
             logger.info("Data pipeline initialized")
 
-            # Initialize feature pipeline
-            self.feature_pipeline = FeaturePipeline(self.pipeline)
-            logger.info("Feature pipeline initialized")
+            # Initialize feature pipeline with ESPN client for injury integration
+            espn_client = getattr(self.pipeline, 'espn', None)
+            self.feature_pipeline = FeaturePipeline(
+                data_pipeline=self.pipeline,
+                espn_client=espn_client,
+            )
+            logger.info(f"Feature pipeline initialized (ESPN client: {espn_client is not None})")
 
             # Initialize model manager
             self.model_manager = ModelManager()

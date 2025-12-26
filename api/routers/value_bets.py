@@ -121,35 +121,44 @@ async def debug_value_detection(request: Request) -> dict[str, Any]:
     """
     Debug endpoint to test the value detection pipeline.
 
-    Runs a single poll cycle and returns detailed diagnostic info.
+    Returns detailed diagnostic info about each step of the pipeline.
     """
     import logging
-    from nfl_bets.scheduler.jobs import poll_odds, _transform_odds_data
+    from nfl_bets.scheduler.jobs import _transform_odds_data
 
     app_state = request.app.state.app_state
     logger = logging.getLogger(__name__)
 
     debug_info = {
         "pipeline_initialized": app_state.pipeline is not None,
+        "feature_pipeline_initialized": app_state.feature_pipeline is not None,
         "value_detector_initialized": app_state.value_detector is not None,
+        "scheduler_running": app_state.scheduler.is_running if app_state.scheduler else False,
         "spread_model_loaded": False,
+        "prop_models_loaded": [],
         "games_count": 0,
+        "sample_games": [],
         "raw_odds_count": 0,
+        "sample_raw_odds": [],
         "transformed_odds_count": 0,
+        "sample_transformed_odds": [],
+        "team_name_mismatches": [],
         "features_built": 0,
-        "value_bets_found": 0,
+        "feature_errors": [],
+        "value_bets_in_memory": 0,
         "min_edge_threshold": None,
+        "min_ev_threshold": None,
         "errors": [],
     }
 
     try:
         # Check spread model
-        if app_state.value_detector and app_state.value_detector.spread_model:
-            debug_info["spread_model_loaded"] = True
-
-        # Check min_edge setting
         if app_state.value_detector:
+            if app_state.value_detector.spread_model:
+                debug_info["spread_model_loaded"] = True
+            debug_info["prop_models_loaded"] = list(app_state.value_detector.prop_models.keys())
             debug_info["min_edge_threshold"] = app_state.value_detector.min_edge
+            debug_info["min_ev_threshold"] = app_state.value_detector.min_ev
 
         # Get games
         if app_state.pipeline:
@@ -157,25 +166,78 @@ async def debug_value_detection(request: Request) -> dict[str, Any]:
             if games_df is not None:
                 games = games_df.to_dicts()
                 debug_info["games_count"] = len(games)
+                debug_info["sample_games"] = [
+                    {
+                        "game_id": g.get("game_id"),
+                        "home_team": g.get("home_team"),
+                        "away_team": g.get("away_team"),
+                        "season": g.get("season"),
+                        "week": g.get("week"),
+                    }
+                    for g in games[:3]
+                ]
 
                 # Get raw odds
                 raw_odds = await app_state.pipeline.get_game_odds()
                 debug_info["raw_odds_count"] = len(raw_odds) if raw_odds else 0
 
-                # Transform odds
-                if raw_odds and games:
+                if raw_odds:
+                    debug_info["sample_raw_odds"] = [
+                        {
+                            "home_team": o.get("home_team"),
+                            "away_team": o.get("away_team"),
+                            "bookmakers_count": len(o.get("bookmakers", [])),
+                        }
+                        for o in raw_odds[:3]
+                    ]
+
+                    # Transform odds and track mismatches
                     transformed = _transform_odds_data(raw_odds, games)
                     debug_info["transformed_odds_count"] = len(transformed)
 
-                    # Show sample transformed odds
                     if transformed:
                         debug_info["sample_transformed_odds"] = transformed[:3]
 
-        # Get current value bets
-        debug_info["value_bets_found"] = len(app_state.last_value_bets)
+                    # Identify team name mismatches
+                    game_teams = set()
+                    for g in games:
+                        game_teams.add(g.get("home_team", "").upper())
+                        game_teams.add(g.get("away_team", "").upper())
+
+                    for odds_event in raw_odds:
+                        home = odds_event.get("home_team", "")
+                        away = odds_event.get("away_team", "")
+                        # These would be the normalized versions
+                        from nfl_bets.scheduler.jobs import TEAM_NAME_MAP
+                        home_norm = TEAM_NAME_MAP.get(home, home.upper())
+                        away_norm = TEAM_NAME_MAP.get(away, away.upper())
+
+                        if home_norm not in game_teams or away_norm not in game_teams:
+                            debug_info["team_name_mismatches"].append({
+                                "odds_home": home,
+                                "odds_away": away,
+                                "normalized_home": home_norm,
+                                "normalized_away": away_norm,
+                                "home_in_games": home_norm in game_teams,
+                                "away_in_games": away_norm in game_teams,
+                            })
+
+                    # Limit mismatches shown
+                    debug_info["team_name_mismatches"] = debug_info["team_name_mismatches"][:5]
+
+        # Get current value bets in memory
+        debug_info["value_bets_in_memory"] = len(app_state.last_value_bets)
+
+        # Check last poll time
+        if app_state.scheduler:
+            last_poll = app_state.scheduler.get_last_poll_time()
+            if last_poll:
+                debug_info["last_poll_time"] = last_poll.isoformat()
 
     except Exception as e:
-        debug_info["errors"].append(str(e))
+        import traceback
+        debug_info["errors"].append(f"{type(e).__name__}: {str(e)}")
+        debug_info["traceback"] = traceback.format_exc()
 
     return debug_info
 

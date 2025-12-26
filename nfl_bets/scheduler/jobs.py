@@ -14,6 +14,42 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
+# Team name normalization for Odds API full names -> nflverse abbreviations
+TEAM_NAME_MAP = {
+    "Arizona Cardinals": "ARI",
+    "Atlanta Falcons": "ATL",
+    "Baltimore Ravens": "BAL",
+    "Buffalo Bills": "BUF",
+    "Carolina Panthers": "CAR",
+    "Chicago Bears": "CHI",
+    "Cincinnati Bengals": "CIN",
+    "Cleveland Browns": "CLE",
+    "Dallas Cowboys": "DAL",
+    "Denver Broncos": "DEN",
+    "Detroit Lions": "DET",
+    "Green Bay Packers": "GB",
+    "Houston Texans": "HOU",
+    "Indianapolis Colts": "IND",
+    "Jacksonville Jaguars": "JAX",
+    "Kansas City Chiefs": "KC",
+    "Las Vegas Raiders": "LV",
+    "Los Angeles Chargers": "LAC",
+    "Los Angeles Rams": "LAR",
+    "Miami Dolphins": "MIA",
+    "Minnesota Vikings": "MIN",
+    "New England Patriots": "NE",
+    "New Orleans Saints": "NO",
+    "New York Giants": "NYG",
+    "New York Jets": "NYJ",
+    "Philadelphia Eagles": "PHI",
+    "Pittsburgh Steelers": "PIT",
+    "San Francisco 49ers": "SF",
+    "Seattle Seahawks": "SEA",
+    "Tampa Bay Buccaneers": "TB",
+    "Tennessee Titans": "TEN",
+    "Washington Commanders": "WAS",
+}
+
 
 def _transform_odds_data(raw_odds: list[dict], games: list[dict]) -> list[dict]:
     """
@@ -65,42 +101,6 @@ def _transform_odds_data(raw_odds: list[dict], games: list[dict]) -> list[dict]:
         game_id = game.get("game_id")
         if home and away and game_id:
             team_to_game[(home, away)] = game_id
-
-    # Team name normalization for Odds API full names
-    TEAM_NAME_MAP = {
-        "Arizona Cardinals": "ARI",
-        "Atlanta Falcons": "ATL",
-        "Baltimore Ravens": "BAL",
-        "Buffalo Bills": "BUF",
-        "Carolina Panthers": "CAR",
-        "Chicago Bears": "CHI",
-        "Cincinnati Bengals": "CIN",
-        "Cleveland Browns": "CLE",
-        "Dallas Cowboys": "DAL",
-        "Denver Broncos": "DEN",
-        "Detroit Lions": "DET",
-        "Green Bay Packers": "GB",
-        "Houston Texans": "HOU",
-        "Indianapolis Colts": "IND",
-        "Jacksonville Jaguars": "JAX",
-        "Kansas City Chiefs": "KC",
-        "Las Vegas Raiders": "LV",
-        "Los Angeles Chargers": "LAC",
-        "Los Angeles Rams": "LAR",
-        "Miami Dolphins": "MIA",
-        "Minnesota Vikings": "MIN",
-        "New England Patriots": "NE",
-        "New Orleans Saints": "NO",
-        "New York Giants": "NYG",
-        "New York Jets": "NYJ",
-        "Philadelphia Eagles": "PHI",
-        "Pittsburgh Steelers": "PIT",
-        "San Francisco 49ers": "SF",
-        "Seattle Seahawks": "SEA",
-        "Tampa Bay Buccaneers": "TB",
-        "Tennessee Titans": "TEN",
-        "Washington Commanders": "WAS",
-    }
 
     def normalize_team(name: str) -> str:
         """Normalize team name to abbreviation."""
@@ -198,36 +198,61 @@ async def poll_odds(
     """
     from nfl_bets.betting.kelly_calculator import KellyCalculator
 
-    logger.debug("Starting odds poll...")
+    logger.info("=== STARTING ODDS POLL ===")
     start_time = datetime.now()
 
     try:
         # 1. Get upcoming games (returns Polars DataFrame)
         games_df = await pipeline.get_upcoming_games()
         if games_df is None or len(games_df) == 0:
-            logger.debug("No upcoming games found")
+            logger.warning("POLL FAILED: No upcoming games found from nflverse")
             return []
 
         # Convert DataFrame to list of dicts for iteration
         games = games_df.to_dicts()
-        logger.info(f"Found {len(games)} upcoming games")
+        logger.info(f"Step 1: Found {len(games)} upcoming games")
+
+        # Log sample game data for debugging
+        if games:
+            sample = games[0]
+            logger.info(f"Sample game: {sample.get('game_id')} - {sample.get('away_team')} @ {sample.get('home_team')}, season={sample.get('season')}, week={sample.get('week')}")
 
         # 2. Fetch latest odds (raw API format)
         raw_odds = await pipeline.get_game_odds()
         if not raw_odds:
-            logger.warning("No odds data available")
+            logger.warning("POLL FAILED: No odds data from Odds API - check API key and connectivity")
             return []
 
-        logger.info(f"Fetched odds for {len(raw_odds)} games from API")
+        logger.info(f"Step 2: Fetched odds for {len(raw_odds)} games from Odds API")
+
+        # Log sample raw odds for debugging
+        if raw_odds:
+            sample = raw_odds[0]
+            logger.info(f"Sample raw odds: {sample.get('home_team')} vs {sample.get('away_team')}, bookmakers={len(sample.get('bookmakers', []))}")
 
         # Transform to format expected by ValueDetector
         odds_data = _transform_odds_data(raw_odds, games)
+        logger.info(f"Step 3: Transformed {len(odds_data)} odds entries (from {len(raw_odds)} API events)")
+
         if not odds_data:
-            logger.warning("No odds matched to games after transformation")
+            logger.warning("POLL FAILED: No odds matched to games after transformation")
+            logger.warning("This usually means team names from Odds API don't match nflverse team abbreviations")
+            # Log the teams for debugging
+            api_teams = set()
+            for o in raw_odds:
+                api_teams.add(o.get('home_team', ''))
+                api_teams.add(o.get('away_team', ''))
+            game_teams = set()
+            for g in games:
+                game_teams.add(g.get('home_team', ''))
+                game_teams.add(g.get('away_team', ''))
+            logger.warning(f"Odds API teams (sample): {list(api_teams)[:6]}")
+            logger.warning(f"Game teams: {list(game_teams)[:6]}")
             return []
 
         # 3. Build features for each game
         features = {}
+        feature_errors = []
         for game in games:
             game_id = game.get("game_id")
             if not game_id:
@@ -238,7 +263,7 @@ async def poll_odds(
             week = game.get("week")
 
             if not season or not week:
-                logger.warning(f"Missing season/week for game {game_id}")
+                feature_errors.append(f"{game_id}: missing season/week")
                 continue
 
             try:
@@ -252,12 +277,20 @@ async def poll_odds(
                 # Extract the features dict from SpreadPredictionFeatures object
                 features[game_id] = game_features.features
             except Exception as e:
-                logger.warning(f"Could not build features for {game_id}: {e}")
+                feature_errors.append(f"{game_id}: {str(e)[:50]}")
 
-        # Log feature building summary
-        logger.info(f"Built features for {len(features)}/{len(games)} games")
+        logger.info(f"Step 4: Built features for {len(features)}/{len(games)} games")
+        if feature_errors and len(feature_errors) <= 5:
+            logger.warning(f"Feature errors: {feature_errors}")
+        elif feature_errors:
+            logger.warning(f"Feature errors (first 5): {feature_errors[:5]}")
+
+        if not features:
+            logger.warning("POLL FAILED: No features built for any game")
+            return []
 
         # 4. Run value detection
+        logger.info(f"Step 5: Running value detection on {len(odds_data)} odds entries")
         result = value_detector.scan_spreads(
             games=games,
             odds_data=odds_data,
@@ -265,6 +298,12 @@ async def poll_odds(
         )
 
         value_bets = result.value_bets
+        logger.info(f"Step 6: Value detection found {len(value_bets)} value bets (scanned {result.games_scanned} games)")
+
+        # Log threshold info if no bets found
+        if not value_bets:
+            logger.info(f"No value bets met thresholds: min_edge={value_detector.min_edge}, min_ev={value_detector.min_ev}")
+            logger.info("This is normal if market is efficient or model predictions are close to market odds")
 
         # 5. Calculate recommended stakes
         kelly = KellyCalculator()
@@ -277,12 +316,14 @@ async def poll_odds(
             bet.recommended_stake = stake.recommended_stake
 
         elapsed = (datetime.now() - start_time).total_seconds()
-        logger.debug(f"Odds poll complete in {elapsed:.1f}s, found {len(value_bets)} value bets")
+        logger.info(f"=== ODDS POLL COMPLETE in {elapsed:.1f}s === Found {len(value_bets)} value bets")
 
         return value_bets
 
     except Exception as e:
-        logger.error(f"Odds polling failed: {e}")
+        import traceback
+        logger.error(f"POLL FAILED with exception: {e}")
+        logger.error(traceback.format_exc())
         raise
 
 
