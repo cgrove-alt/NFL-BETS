@@ -258,12 +258,10 @@ async def poll_odds(
         # historical PBP data for team performance metrics
         schedules_df = pl.DataFrame(games)
 
-        # Determine PBP season - for 2025 labeled games, we need 2024 PBP data
-        # (the actual current NFL season's played games)
+        # Use the season from game data - nflverse labels by season start year
+        # (e.g., 2025-2026 season = season 2025)
         sample_season = games[0].get("season") if games else None
-        pbp_season = int(sample_season) if sample_season else 2024
-        if pbp_season == 2025:
-            pbp_season = 2024  # Use current NFL season's played data
+        pbp_season = int(sample_season) if sample_season else 2025
 
         # Fetch PBP data once for all games
         logger.info(f"Fetching PBP data for season {pbp_season}")
