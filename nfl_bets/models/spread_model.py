@@ -246,16 +246,22 @@ class SpreadModel(BaseModel):
         validation_data: Optional[tuple] = None,
         early_stopping_rounds: int = 50,
         fit_calibrator: bool = True,
+        season_week_index: Optional[np.ndarray] = None,
     ) -> "SpreadModel":
         """
-        Train the ensemble model.
+        Train the ensemble model using proper time-series split.
+
+        CRITICAL: Uses chronological split to prevent data leakage.
+        Data is sorted by time and the last 20% is used for validation.
+        NO shuffling or stratification is used.
 
         Args:
-            X: Feature matrix
+            X: Feature matrix (should be ordered chronologically)
             y: Target values (actual spreads: home_score - away_score)
             validation_data: Optional (X_val, y_val) for early stopping
             early_stopping_rounds: Rounds for early stopping
             fit_calibrator: Whether to fit probability calibrator
+            season_week_index: Optional array of (season * 100 + week) for sorting
 
         Returns:
             Self for method chaining
@@ -265,15 +271,33 @@ class SpreadModel(BaseModel):
 
         self.logger.info(f"Training spread model on {len(y_arr)} samples, {X_arr.shape[1]} features")
 
+        # If season_week_index provided, sort chronologically
+        if season_week_index is not None:
+            sort_idx = np.argsort(season_week_index)
+            X_arr = X_arr[sort_idx]
+            y_arr = y_arr[sort_idx]
+            self.logger.info("Data sorted chronologically by season/week")
+
         # Apply feature selection if enabled
         if self.use_feature_selection:
             X_arr = self._fit_feature_selection(X_arr, y_arr)
             self.logger.info(f"After feature selection: {X_arr.shape[1]} features retained")
 
-        # Split for validation if not provided
+        # TIME-SERIES SPLIT: Use last 20% chronologically for validation
+        # CRITICAL: No shuffling, no stratification - pure temporal split
         if validation_data is None:
-            X_train, X_val, y_train, y_val = train_test_split(
-                X_arr, y_arr, test_size=0.2, random_state=42
+            n_samples = len(y_arr)
+            split_idx = int(n_samples * 0.8)  # 80% train, 20% validation
+
+            # Strictly chronological split - NO randomness
+            X_train = X_arr[:split_idx]
+            y_train = y_arr[:split_idx]
+            X_val = X_arr[split_idx:]
+            y_val = y_arr[split_idx:]
+
+            self.logger.info(
+                f"Time-series split: {len(y_train)} train / {len(y_val)} validation "
+                f"(last {100 * len(y_val) / n_samples:.1f}% for validation)"
             )
         else:
             X_train, y_train = X_arr, y_arr
@@ -985,10 +1009,12 @@ class SpreadModel(BaseModel):
             use_calibration=True,
         )
 
-        # Split for final training
-        X_train, X_val, y_train, y_val = train_test_split(
-            X_arr, y_arr, test_size=0.2, random_state=42
-        )
+        # CRITICAL: Use time-series split for final model (last 20% chronologically)
+        # NO random splitting - data should already be ordered by time
+        n_samples = len(y_arr)
+        split_idx = int(n_samples * 0.8)
+        X_train, X_val = X_arr[:split_idx], X_arr[split_idx:]
+        y_train, y_val = y_arr[:split_idx], y_arr[split_idx:]
 
         final_model.train(
             X_train, y_train,
