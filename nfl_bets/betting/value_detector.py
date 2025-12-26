@@ -197,8 +197,8 @@ class ValueDetector:
     """
 
     # Default thresholds
-    DEFAULT_MIN_EDGE = 0.03  # 3% minimum edge
-    DEFAULT_MIN_EV = 0.02  # 2% minimum expected value
+    DEFAULT_MIN_EDGE = 0.01  # 1% minimum edge
+    DEFAULT_MIN_EV = 0.005  # 0.5% minimum expected value
 
     # Urgency thresholds
     CRITICAL_EDGE = 0.08  # 8%

@@ -18,7 +18,7 @@ class ValueDetectionSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="")
 
     min_edge_threshold: Decimal = Field(
-        default=Decimal("0.03"),
+        default=Decimal("0.01"),
         description="Minimum edge (model prob - implied prob) to flag as value bet",
     )
     min_confidence_threshold: Decimal = Field(
