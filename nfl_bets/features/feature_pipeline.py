@@ -437,21 +437,16 @@ class FeaturePipeline:
         """
         self.logger.debug(f"Building prop features: {player_name} - {prop_type}")
 
-        # Map season 2025 -> 2024 for PBP data (current NFL season's played games)
-        pbp_season = season
-        if pbp_season == 2025:
-            pbp_season = 2024
-
         # Fetch data if not provided
         if pbp_df is None and self.data_pipeline:
-            pbp_df = await self.data_pipeline.get_historical_pbp([pbp_season])
+            pbp_df = await self.data_pipeline.get_historical_pbp([season])
 
         features = {}
 
         # Build player features
         if pbp_df is not None:
             player_features = await self.player_builder.build_matchup_features(
-                pbp_df, player_id, opponent_team, pbp_season, week, position
+                pbp_df, player_id, opponent_team, season, week, position
             )
             features.update(player_features.features)
 

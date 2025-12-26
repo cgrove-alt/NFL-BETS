@@ -676,11 +676,9 @@ async def poll_props(
 
         logger.info(f"Step 3: Found {len(all_props)} player props from DraftKings")
 
-        # 4. Determine PBP season (map 2025 -> 2024 for current season)
+        # 4. Determine PBP season from game data
         sample_season = games[0].get("season") if games else None
-        pbp_season = int(sample_season) if sample_season else 2024
-        if pbp_season == 2025:
-            pbp_season = 2024  # Use current NFL season's played data
+        pbp_season = int(sample_season) if sample_season else 2025
         logger.info(f"Step 4: Using PBP season {pbp_season} for features")
 
         # Pre-fetch PBP data once for all players

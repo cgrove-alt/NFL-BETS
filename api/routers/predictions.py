@@ -339,14 +339,9 @@ async def get_all_predictions(
         gid = game.get("game_id", "")
         home_team = game.get("home_team", "")
         away_team = game.get("away_team", "")
-        season = game.get("season", 2024)
+        season = game.get("season", 2025)
         week = game.get("week", 1)
         kickoff = game.get("commence_time") or game.get("gameday") or ""
-
-        # Map season 2025 -> 2024 for PBP data (current NFL season's played games)
-        pbp_season = season
-        if pbp_season == 2025:
-            pbp_season = 2024
 
         if isinstance(kickoff, datetime):
             kickoff = kickoff.isoformat()
@@ -387,10 +382,10 @@ async def get_all_predictions(
                 injury_status = player_info.get("injury_status", "ACTIVE")
                 prop_types = _get_prop_type_for_position(position)
 
-                # Look up the real nflverse player_id from name (use mapped season for PBP lookup)
+                # Look up the real nflverse player_id from name
                 player_id = await app_state.feature_pipeline.lookup_player_id(
                     player_name=player_name,
-                    season=pbp_season,
+                    season=season,
                     position=position,
                 )
 
