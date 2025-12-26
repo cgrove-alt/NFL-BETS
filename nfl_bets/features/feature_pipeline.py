@@ -454,12 +454,31 @@ class FeaturePipeline:
         """
         self.logger.debug(f"Building spread features: {home_team} vs {away_team}")
 
-        # Fetch data if not provided
+        # Fetch data if not provided - try multiple seasons for reliability
+        # This handles the case where season=2025 but nflverse labels data as 2024
         if pbp_df is None and self.data_pipeline:
-            pbp_df = await self.data_pipeline.get_historical_pbp([season])
+            seasons_to_try = [season, season - 1, season - 2]
+            for s in seasons_to_try:
+                try:
+                    pbp_df = await self.data_pipeline.get_historical_pbp([s])
+                    if pbp_df is not None and len(pbp_df) > 0:
+                        self.logger.debug(f"Loaded PBP data from season {s} for spread features")
+                        break
+                except Exception as e:
+                    self.logger.debug(f"Failed to load PBP for season {s}: {e}")
+                    continue
 
         if schedules_df is None and self.data_pipeline:
-            schedules_df = await self.data_pipeline.get_schedules([season])
+            seasons_to_try = [season, season - 1, season - 2]
+            for s in seasons_to_try:
+                try:
+                    schedules_df = await self.data_pipeline.get_schedules([s])
+                    if schedules_df is not None and len(schedules_df) > 0:
+                        self.logger.debug(f"Loaded schedules from season {s} for spread features")
+                        break
+                except Exception as e:
+                    self.logger.debug(f"Failed to load schedules for season {s}: {e}")
+                    continue
 
         features = {}
 
