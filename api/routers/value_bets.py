@@ -130,7 +130,7 @@ async def debug_value_detection(request: Request) -> dict[str, Any]:
     logger = logging.getLogger(__name__)
 
     debug_info = {
-        "code_version": "v2-season-fix",  # Update this to verify deployment
+        "code_version": "v3-debug-enhanced",  # Update this to verify deployment
         "pipeline_initialized": app_state.pipeline is not None,
         "feature_pipeline_initialized": app_state.feature_pipeline is not None,
         "value_detector_initialized": app_state.value_detector is not None,
@@ -229,15 +229,29 @@ async def debug_value_detection(request: Request) -> dict[str, Any]:
         # Get current value bets in memory
         debug_info["value_bets_in_memory"] = len(app_state.last_value_bets)
 
+        # Show sample value bets if any
+        if app_state.last_value_bets:
+            debug_info["sample_value_bets"] = [
+                {
+                    "description": bet.description,
+                    "edge": bet.edge,
+                    "model_probability": bet.model_probability,
+                    "odds": bet.odds,
+                }
+                for bet in app_state.last_value_bets[:3]
+            ]
+
         # Check scheduler job status
         if app_state.scheduler:
             try:
                 job_status = app_state.scheduler.get_job_status()
                 poll_status = job_status.get("poll_odds", {})
-                debug_info["last_poll_status"] = poll_status.get("status")
-                if poll_status.get("last_run"):
-                    debug_info["last_poll_time"] = poll_status["last_run"].isoformat()
-                debug_info["poll_error"] = poll_status.get("error")
+                debug_info["last_poll"] = {
+                    "status": poll_status.get("last_status"),
+                    "time": poll_status.get("last_run").isoformat() if poll_status.get("last_run") else None,
+                    "error": poll_status.get("last_error"),
+                    "run_count": poll_status.get("run_count", 0),
+                }
             except Exception as e:
                 debug_info["scheduler_status_error"] = str(e)
 
