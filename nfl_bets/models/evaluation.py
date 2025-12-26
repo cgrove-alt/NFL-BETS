@@ -591,3 +591,334 @@ def log_loss(
             + (1 - actual_outcomes) * np.log(1 - probs)
         )
     )
+
+
+def binomial_test(
+    wins: int,
+    total: int,
+    null_prob: float = 0.5,
+) -> dict[str, float]:
+    """
+    Perform binomial test for betting performance.
+
+    Tests whether win rate is significantly different from null probability.
+    Used to determine if model edge is statistically significant.
+
+    Args:
+        wins: Number of wins
+        total: Total number of bets
+        null_prob: Null hypothesis probability (default 0.5 for fair coin)
+
+    Returns:
+        Dict with p-value and confidence interval
+    """
+    from scipy import stats as scipy_stats
+
+    if total == 0:
+        return {"p_value": 1.0, "ci_lower": 0.0, "ci_upper": 1.0, "significant": False}
+
+    # Two-sided binomial test
+    result = scipy_stats.binomtest(wins, total, null_prob, alternative='two-sided')
+
+    return {
+        "p_value": result.pvalue,
+        "ci_lower": result.proportion_ci(confidence_level=0.95).low,
+        "ci_upper": result.proportion_ci(confidence_level=0.95).high,
+        "significant": result.pvalue < 0.05,
+        "win_rate": wins / total,
+        "expected_rate": null_prob,
+    }
+
+
+def bootstrap_ci(
+    values: np.ndarray,
+    n_bootstrap: int = 1000,
+    confidence: float = 0.95,
+) -> tuple[float, float, float]:
+    """
+    Calculate bootstrap confidence interval for a metric.
+
+    Args:
+        values: Array of metric values
+        n_bootstrap: Number of bootstrap samples
+        confidence: Confidence level
+
+    Returns:
+        Tuple of (mean, ci_lower, ci_upper)
+    """
+    n = len(values)
+    if n == 0:
+        return (0.0, 0.0, 0.0)
+
+    # Bootstrap resampling
+    bootstrap_means = np.zeros(n_bootstrap)
+    for i in range(n_bootstrap):
+        sample_idx = np.random.randint(0, n, size=n)
+        bootstrap_means[i] = np.mean(values[sample_idx])
+
+    alpha = 1 - confidence
+    ci_lower = np.percentile(bootstrap_means, alpha / 2 * 100)
+    ci_upper = np.percentile(bootstrap_means, (1 - alpha / 2) * 100)
+
+    return (float(np.mean(values)), float(ci_lower), float(ci_upper))
+
+
+class WeeklyWalkForwardValidator:
+    """
+    Week-by-week walk-forward validation for NFL models.
+
+    More granular than season-level validation, testing each week
+    using all prior data for training.
+
+    This catches issues that season-level validation might miss:
+    - Mid-season performance degradation
+    - Early vs late season differences
+    - Weekly variance patterns
+    """
+
+    def __init__(
+        self,
+        min_train_weeks: int = 34,  # ~2 seasons worth
+        train_gap_weeks: int = 0,  # Gap between train and test
+    ):
+        """
+        Initialize the validator.
+
+        Args:
+            min_train_weeks: Minimum weeks of data for training
+            train_gap_weeks: Weeks to skip between train and test
+        """
+        self.min_train_weeks = min_train_weeks
+        self.train_gap_weeks = train_gap_weeks
+        self.logger = logger.bind(component="weekly_walk_forward")
+
+    def validate(
+        self,
+        model: BaseModel,
+        df: pl.DataFrame,
+        target_col: str,
+        feature_cols: list[str],
+        season_col: str = "season",
+        week_col: str = "week",
+        line_col: Optional[str] = None,
+        model_factory: Optional[Callable[[], BaseModel]] = None,
+        retrain_every: int = 4,  # Retrain every N weeks
+    ) -> dict[str, Any]:
+        """
+        Perform weekly walk-forward validation.
+
+        Args:
+            model: Model template
+            df: Training data
+            target_col: Target column name
+            feature_cols: Feature column names
+            season_col: Season identifier column
+            week_col: Week identifier column
+            line_col: Optional betting line column
+            model_factory: Factory for creating fresh models
+            retrain_every: How often to retrain (1 = every week)
+
+        Returns:
+            Dict with weekly validation metrics
+        """
+        # Create combined week identifier
+        df = df.with_columns([
+            (pl.col(season_col).cast(str) + "_" + pl.col(week_col).cast(str).str.zfill(2))
+            .alias("season_week")
+        ]).sort("season_week")
+
+        # Get unique weeks in order
+        all_weeks = df["season_week"].unique().sort().to_list()
+
+        if len(all_weeks) <= self.min_train_weeks:
+            raise ValueError(
+                f"Not enough weeks for validation. "
+                f"Need {self.min_train_weeks + 1}, have {len(all_weeks)}"
+            )
+
+        self.logger.info(
+            f"Running weekly walk-forward on {len(all_weeks)} weeks, "
+            f"testing {len(all_weeks) - self.min_train_weeks} weeks"
+        )
+
+        # Track results
+        weekly_results = []
+        all_predictions = []
+        all_actuals = []
+        all_lines = [] if line_col else None
+        current_model = None
+
+        for week_idx in range(self.min_train_weeks, len(all_weeks)):
+            test_week = all_weeks[week_idx]
+            train_end_idx = week_idx - self.train_gap_weeks
+            train_weeks = all_weeks[:train_end_idx]
+
+            if len(train_weeks) < self.min_train_weeks:
+                continue
+
+            # Retrain if needed
+            should_retrain = (
+                current_model is None or
+                (week_idx - self.min_train_weeks) % retrain_every == 0
+            )
+
+            if should_retrain:
+                # Get training data
+                train_df = df.filter(pl.col("season_week").is_in(train_weeks))
+                X_train = train_df.select(feature_cols).to_numpy()
+                y_train = train_df[target_col].to_numpy()
+
+                # Create and train model
+                if model_factory:
+                    current_model = model_factory()
+                else:
+                    current_model = model.__class__()
+
+                current_model.train(X_train, y_train)
+
+            # Get test data
+            test_df = df.filter(pl.col("season_week") == test_week)
+            X_test = test_df.select(feature_cols).to_numpy()
+            y_test = test_df[target_col].to_numpy()
+
+            if len(y_test) == 0:
+                continue
+
+            # Predict
+            predictions = current_model.predict(X_test)
+
+            # Get lines if available
+            lines = None
+            if line_col and line_col in test_df.columns:
+                lines = test_df[line_col].to_numpy()
+
+            # Calculate metrics
+            mae = float(np.mean(np.abs(y_test - predictions)))
+            rmse = float(np.sqrt(np.mean((y_test - predictions) ** 2)))
+
+            # ATS if lines available
+            ats_wins = 0
+            ats_losses = 0
+            if lines is not None:
+                home_picks = predictions > lines
+                home_covers = y_test > lines
+                correct = home_picks == home_covers
+                ats_wins = int(np.sum(correct))
+                ats_losses = len(correct) - ats_wins
+
+            weekly_results.append({
+                "season_week": test_week,
+                "n_games": len(y_test),
+                "mae": mae,
+                "rmse": rmse,
+                "ats_wins": ats_wins,
+                "ats_losses": ats_losses,
+            })
+
+            all_predictions.extend(predictions)
+            all_actuals.extend(y_test)
+            if lines is not None:
+                all_lines.extend(lines)
+
+        # Aggregate results
+        all_predictions = np.array(all_predictions)
+        all_actuals = np.array(all_actuals)
+
+        total_mae = float(np.mean(np.abs(all_actuals - all_predictions)))
+        total_rmse = float(np.sqrt(np.mean((all_actuals - all_predictions) ** 2)))
+
+        total_wins = sum(r["ats_wins"] for r in weekly_results)
+        total_losses = sum(r["ats_losses"] for r in weekly_results)
+
+        # Statistical significance
+        significance = binomial_test(total_wins, total_wins + total_losses, 0.525)
+
+        # MAE confidence interval
+        errors = np.abs(all_actuals - all_predictions)
+        mae_mean, mae_ci_low, mae_ci_high = bootstrap_ci(errors)
+
+        return {
+            "n_weeks_tested": len(weekly_results),
+            "n_total_games": len(all_actuals),
+            "total_mae": total_mae,
+            "total_rmse": total_rmse,
+            "mae_ci": (mae_mean, mae_ci_low, mae_ci_high),
+            "ats_record": (total_wins, total_losses),
+            "ats_win_rate": total_wins / (total_wins + total_losses) if (total_wins + total_losses) > 0 else 0.0,
+            "statistical_significance": significance,
+            "weekly_results": weekly_results,
+        }
+
+
+def comprehensive_model_evaluation(
+    model: BaseModel,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    lines: Optional[np.ndarray] = None,
+    predicted_probs: Optional[np.ndarray] = None,
+) -> dict[str, Any]:
+    """
+    Comprehensive evaluation of model performance.
+
+    Returns multiple metrics across different dimensions:
+    - Regression metrics (MAE, RMSE, R²)
+    - Classification metrics (ATS, accuracy)
+    - Probability calibration (if probs provided)
+    - Statistical significance
+
+    Args:
+        model: Fitted model
+        X_test: Test features
+        y_test: Test targets
+        lines: Betting lines (optional)
+        predicted_probs: Probability predictions (optional)
+
+    Returns:
+        Dict with comprehensive metrics
+    """
+    predictions = model.predict(X_test)
+
+    # Regression metrics
+    mae = float(np.mean(np.abs(y_test - predictions)))
+    rmse = float(np.sqrt(np.mean((y_test - predictions) ** 2)))
+    ss_tot = np.sum((y_test - np.mean(y_test)) ** 2)
+    ss_res = np.sum((y_test - predictions) ** 2)
+    r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+
+    results = {
+        "mae": mae,
+        "rmse": rmse,
+        "r2": r2,
+        "n_samples": len(y_test),
+    }
+
+    # MAE confidence interval
+    errors = np.abs(y_test - predictions)
+    mae_mean, mae_ci_low, mae_ci_high = bootstrap_ci(errors)
+    results["mae_ci"] = (mae_ci_low, mae_ci_high)
+
+    # ATS metrics
+    if lines is not None:
+        home_picks = predictions > lines
+        home_covers = y_test > lines
+        correct = home_picks == home_covers
+
+        wins = int(np.sum(correct))
+        losses = len(correct) - wins
+
+        results["ats_wins"] = wins
+        results["ats_losses"] = losses
+        results["ats_win_rate"] = wins / len(correct) if len(correct) > 0 else 0.0
+
+        # Statistical significance for ATS
+        # Need >52.5% to overcome -110 juice
+        results["ats_significance"] = binomial_test(wins, len(correct), 0.525)
+
+    # Probability calibration
+    if predicted_probs is not None:
+        outcomes = (y_test > lines) if lines is not None else (y_test > 0)
+        results["ece"] = expected_calibration_error(predicted_probs, outcomes.astype(float))
+        results["brier_score"] = brier_score(predicted_probs, outcomes.astype(float))
+        results["log_loss"] = log_loss(predicted_probs, outcomes.astype(float))
+
+    return results

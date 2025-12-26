@@ -456,12 +456,14 @@ class TotalsModel(BaseModel):
     def predict_quantiles(
         self,
         X: Union[pl.DataFrame, np.ndarray],
+        enforce_monotonicity: bool = True,
     ) -> dict[float, np.ndarray]:
         """
         Predict all quantiles.
 
         Args:
             X: Feature matrix
+            enforce_monotonicity: If True, fix quantile crossing issues
 
         Returns:
             Dictionary mapping quantile to predictions
@@ -469,10 +471,65 @@ class TotalsModel(BaseModel):
         self._validate_fitted()
         X_arr = self._prepare_features(X)
 
-        return {
+        # Get raw predictions
+        raw_preds = {
             q: self._quantile_models[q].predict(X_arr)
             for q in self.quantiles
         }
+
+        if not enforce_monotonicity:
+            return raw_preds
+
+        # Fix quantile crossing by enforcing monotonicity
+        # q_10 <= q_25 <= q_50 <= q_75 <= q_90
+        return self._enforce_quantile_monotonicity(raw_preds)
+
+    def _enforce_quantile_monotonicity(
+        self,
+        quantile_preds: dict[float, np.ndarray],
+    ) -> dict[float, np.ndarray]:
+        """
+        Enforce monotonicity in quantile predictions.
+
+        Quantile crossing can occur when models are trained independently.
+        This method fixes violations by:
+        1. Sorting predictions and redistributing values
+        2. Ensuring q_lower <= q_upper for all samples
+
+        Args:
+            quantile_preds: Raw quantile predictions
+
+        Returns:
+            Monotonicity-enforced predictions
+        """
+        n_samples = len(quantile_preds[self.quantiles[0]])
+        sorted_qs = sorted(self.quantiles)
+
+        # Stack all predictions: shape (n_quantiles, n_samples)
+        stacked = np.vstack([quantile_preds[q] for q in sorted_qs])
+
+        # For each sample, sort the quantile values to enforce monotonicity
+        fixed_preds = {}
+        for i in range(n_samples):
+            sample_vals = stacked[:, i]
+
+            # Check if monotonicity is violated
+            if not np.all(np.diff(sample_vals) >= 0):
+                # Sort values to enforce monotonicity
+                sorted_vals = np.sort(sample_vals)
+
+                # Optional: Use isotonic regression for smoother fix
+                # from sklearn.isotonic import IsotonicRegression
+                # ir = IsotonicRegression()
+                # sorted_vals = ir.fit_transform(np.arange(len(sorted_qs)), sample_vals)
+
+                stacked[:, i] = sorted_vals
+
+        # Unpack back to dictionary
+        for j, q in enumerate(sorted_qs):
+            fixed_preds[q] = stacked[j, :]
+
+        return fixed_preds
 
     def predict_game(
         self,

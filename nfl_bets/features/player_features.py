@@ -32,10 +32,20 @@ class PlayerFeatureBuilder(BaseFeatureBuilder, RollingWindowMixin):
 
     Key feature categories:
     - Volume: Targets, carries, snap share, routes run
+    - Snap: Estimated snap counts and participation rates
     - Efficiency: Yards per route, catch rate, YAC
     - Trends: Increasing/decreasing usage
     - Matchup: Opponent defensive strength
     """
+
+    # Snap count features (estimated from play participation)
+    SNAP_COUNT_FEATURES = [
+        "est_snap_count",
+        "est_snap_pct",
+        "plays_involved",
+        "play_involvement_rate",
+        "snap_trend",
+    ]
 
     # Receiver features
     RECEIVER_VOLUME_FEATURES = [
@@ -44,6 +54,7 @@ class PlayerFeatureBuilder(BaseFeatureBuilder, RollingWindowMixin):
         "air_yards",
         "air_yards_share",
         "receptions",
+        "route_participation",
     ]
 
     RECEIVER_EFFICIENCY_FEATURES = [
@@ -52,6 +63,7 @@ class PlayerFeatureBuilder(BaseFeatureBuilder, RollingWindowMixin):
         "yards_per_reception",
         "yac_per_reception",
         "receiving_epa",
+        "target_per_route",
     ]
 
     # Rusher features
@@ -59,12 +71,14 @@ class PlayerFeatureBuilder(BaseFeatureBuilder, RollingWindowMixin):
         "carries",
         "rush_share",
         "rushing_yards",
+        "rush_attempts_per_game",
     ]
 
     RUSHER_EFFICIENCY_FEATURES = [
         "yards_per_carry",
         "rush_success_rate",
         "rushing_epa",
+        "explosive_rush_rate",
     ]
 
     # Passer features
@@ -72,6 +86,7 @@ class PlayerFeatureBuilder(BaseFeatureBuilder, RollingWindowMixin):
         "pass_attempts",
         "completions",
         "passing_yards",
+        "dropbacks",
     ]
 
     PASSER_EFFICIENCY_FEATURES = [
@@ -81,6 +96,7 @@ class PlayerFeatureBuilder(BaseFeatureBuilder, RollingWindowMixin):
         "cpoe",
         "sack_rate",
         "interception_rate",
+        "pressure_rate",
     ]
 
     def __init__(
@@ -167,6 +183,10 @@ class PlayerFeatureBuilder(BaseFeatureBuilder, RollingWindowMixin):
         # Build trend features
         trend_features = self._build_trend_features(pbp_df, player_id, season, week)
         features.update(trend_features)
+
+        # Build snap count features (estimated from play participation)
+        snap_features = self._build_snap_count_features(pbp_df, player_id, season, week)
+        features.update(snap_features)
 
         # Create feature set
         feature_set = FeatureSet(
@@ -553,6 +573,156 @@ class PlayerFeatureBuilder(BaseFeatureBuilder, RollingWindowMixin):
             carries = carries_by_game["carries"].to_list()
             if len(carries) >= 3:
                 features["usage_trend"] = self._calculate_trend(carries, 5)
+
+        return features
+
+    def _build_snap_count_features(
+        self,
+        pbp_df: pl.DataFrame,
+        player_id: str,
+        season: int,
+        week: int,
+    ) -> dict[str, float]:
+        """
+        Estimate snap counts from play-by-play participation.
+
+        NFLVerse PBP doesn't have direct snap counts, so we estimate by
+        counting plays where the player was involved (target, carry, pass attempt).
+        This gives a reasonable proxy for snap share and involvement.
+
+        Args:
+            pbp_df: Play-by-play DataFrame
+            player_id: nflverse player ID
+            season: NFL season year
+            week: Week number
+
+        Returns:
+            Dictionary with snap count features
+        """
+        features = {
+            "est_snap_count_3g": 0.0,
+            "est_snap_count_5g": 0.0,
+            "est_snap_pct_3g": 0.0,
+            "est_snap_pct_5g": 0.0,
+            "plays_involved_3g": 0.0,
+            "plays_involved_5g": 0.0,
+            "play_involvement_rate_3g": 0.0,
+            "play_involvement_rate_5g": 0.0,
+            "snap_trend": 0.0,
+        }
+
+        # Get plays where player was involved (before this week)
+        prior_plays = pbp_df.filter(
+            (pl.col("season") == season)
+            & (pl.col("week") < week)
+        )
+
+        if len(prior_plays) == 0:
+            return features
+
+        # Find plays where player was involved (receiver, rusher, or passer)
+        player_involved = prior_plays.filter(
+            (pl.col("receiver_id") == player_id) |
+            (pl.col("rusher_id") == player_id) |
+            (pl.col("passer_id") == player_id)
+        )
+
+        if len(player_involved) == 0:
+            return features
+
+        # Get player's team from their plays
+        teams = player_involved.select("posteam").unique()
+        if len(teams) == 0:
+            return features
+        player_team = teams.row(0)[0]
+
+        # Calculate per-game involvement
+        player_game_stats = (
+            player_involved.group_by("game_id")
+            .agg([
+                pl.len().alias("plays_involved"),
+                pl.col("week").first().alias("week"),
+            ])
+            .sort("game_id")
+        )
+
+        # Calculate total team offensive plays per game
+        team_plays = (
+            prior_plays.filter(
+                (pl.col("posteam") == player_team) &
+                (pl.col("play_type").is_in(["pass", "run"]))
+            )
+            .group_by("game_id")
+            .agg([
+                pl.len().alias("total_plays"),
+            ])
+        )
+
+        # Join to get involvement rate
+        if len(team_plays) > 0 and len(player_game_stats) > 0:
+            game_stats = player_game_stats.join(
+                team_plays,
+                on="game_id",
+                how="left"
+            ).with_columns([
+                (pl.col("plays_involved") / pl.col("total_plays").clip(lower_bound=1))
+                .alias("involvement_rate")
+            ])
+
+            # Estimate snap count (plays involved * participation multiplier)
+            # Receivers typically run routes on most pass plays even when not targeted
+            # We estimate ~2.5x multiplier for receivers, ~1.5x for RBs, ~1.0x for QBs
+            game_stats = game_stats.with_columns([
+                (pl.col("plays_involved") * 2.0).alias("est_snaps"),
+                (pl.col("plays_involved") * 2.0 / pl.col("total_plays").clip(lower_bound=1))
+                .alias("est_snap_pct")
+            ])
+
+            # Calculate rolling averages
+            plays_list = game_stats["plays_involved"].to_list()
+            involvement_list = game_stats["involvement_rate"].to_list()
+            snap_list = game_stats["est_snaps"].to_list()
+            snap_pct_list = game_stats["est_snap_pct"].to_list()
+
+            # Clean NaN values
+            plays_list = [v if v is not None and v == v else 0.0 for v in plays_list]
+            involvement_list = [v if v is not None and v == v else 0.0 for v in involvement_list]
+            snap_list = [v if v is not None and v == v else 0.0 for v in snap_list]
+            snap_pct_list = [v if v is not None and v == v else 0.0 for v in snap_pct_list]
+
+            # 3-game rolling
+            if len(plays_list) >= 1:
+                features["plays_involved_3g"] = self._handle_missing(
+                    self._calculate_rolling_mean(plays_list, 3)
+                )
+                features["play_involvement_rate_3g"] = self._handle_missing(
+                    self._calculate_rolling_mean(involvement_list, 3)
+                )
+                features["est_snap_count_3g"] = self._handle_missing(
+                    self._calculate_rolling_mean(snap_list, 3)
+                )
+                features["est_snap_pct_3g"] = self._handle_missing(
+                    self._calculate_rolling_mean(snap_pct_list, 3)
+                )
+
+            # 5-game rolling
+            if len(plays_list) >= 1:
+                features["plays_involved_5g"] = self._handle_missing(
+                    self._calculate_rolling_mean(plays_list, 5)
+                )
+                features["play_involvement_rate_5g"] = self._handle_missing(
+                    self._calculate_rolling_mean(involvement_list, 5)
+                )
+                features["est_snap_count_5g"] = self._handle_missing(
+                    self._calculate_rolling_mean(snap_list, 5)
+                )
+                features["est_snap_pct_5g"] = self._handle_missing(
+                    self._calculate_rolling_mean(snap_pct_list, 5)
+                )
+
+            # Snap trend (are they getting more or fewer snaps?)
+            if len(snap_list) >= 3:
+                features["snap_trend"] = self._calculate_trend(snap_list, 5)
 
         return features
 

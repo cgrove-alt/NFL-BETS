@@ -196,6 +196,84 @@ class BaseFeatureBuilder(ABC):
         recent = values[-window:]
         return sum(recent) / len(recent)
 
+    def _calculate_ema(
+        self,
+        values: list[float],
+        window: int,
+        alpha: Optional[float] = None,
+    ) -> Optional[float]:
+        """
+        Calculate Exponential Moving Average of values.
+
+        EMA weights recent values more heavily than older ones,
+        better capturing momentum and form changes.
+
+        Args:
+            values: List of values (oldest first, most recent last)
+            window: Window size (used to calculate alpha if not provided)
+            alpha: Smoothing factor (0-1). Higher = more weight on recent.
+                   If None, uses alpha = 2/(window+1) (standard EMA formula)
+
+        Returns:
+            EMA value or None if insufficient data
+        """
+        if len(values) == 0:
+            return None
+
+        # Filter out None values
+        clean_values = [v for v in values if v is not None]
+        if len(clean_values) == 0:
+            return None
+
+        # Use only the window of most recent values
+        if len(clean_values) > window:
+            clean_values = clean_values[-window:]
+
+        # Calculate alpha if not provided
+        if alpha is None:
+            alpha = 2.0 / (len(clean_values) + 1)
+
+        # Initialize EMA with first value
+        ema = clean_values[0]
+
+        # Calculate EMA iteratively
+        for value in clean_values[1:]:
+            ema = alpha * value + (1 - alpha) * ema
+
+        return ema
+
+    def _calculate_volatility(
+        self,
+        values: list[float],
+        window: int,
+    ) -> Optional[float]:
+        """
+        Calculate rolling volatility (coefficient of variation).
+
+        Volatility indicates consistency - high volatility means
+        unpredictable performance.
+
+        Args:
+            values: List of values
+            window: Window size
+
+        Returns:
+            Coefficient of variation (std/mean) or None
+        """
+        if len(values) < 2:
+            return None
+
+        recent = values[-window:] if len(values) >= window else values
+        mean = sum(recent) / len(recent)
+
+        if mean == 0:
+            return None
+
+        variance = sum((x - mean) ** 2 for x in recent) / len(recent)
+        std = variance ** 0.5
+
+        return std / abs(mean)  # Coefficient of variation
+
     def _calculate_rolling_std(
         self,
         values: list[float],

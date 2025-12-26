@@ -402,12 +402,14 @@ class BasePropModel(BaseModel):
     def predict_quantiles(
         self,
         X: Union[pl.DataFrame, np.ndarray],
+        enforce_monotonicity: bool = True,
     ) -> dict[float, np.ndarray]:
         """
-        Predict all quantiles.
+        Predict all quantiles with optional monotonicity enforcement.
 
         Args:
             X: Feature matrix
+            enforce_monotonicity: If True, fix quantile crossing issues
 
         Returns:
             Dictionary mapping quantile to predictions
@@ -421,7 +423,52 @@ class BasePropModel(BaseModel):
             ])
             X_arr = X_arr * weights
 
-        return {q: model.predict(X_arr) for q, model in self._quantile_models.items()}
+        # Get raw predictions
+        raw_preds = {q: model.predict(X_arr) for q, model in self._quantile_models.items()}
+
+        if not enforce_monotonicity:
+            return raw_preds
+
+        # Fix quantile crossing by enforcing monotonicity
+        return self._enforce_quantile_monotonicity(raw_preds)
+
+    def _enforce_quantile_monotonicity(
+        self,
+        quantile_preds: dict[float, np.ndarray],
+    ) -> dict[float, np.ndarray]:
+        """
+        Enforce monotonicity in quantile predictions.
+
+        Quantile crossing occurs when q_lower > q_upper for some samples.
+        This fixes violations by sorting predictions for each sample.
+
+        Args:
+            quantile_preds: Raw quantile predictions
+
+        Returns:
+            Monotonicity-enforced predictions
+        """
+        n_samples = len(quantile_preds[self.quantiles[0]])
+        sorted_qs = sorted(self.quantiles)
+
+        # Stack all predictions: shape (n_quantiles, n_samples)
+        stacked = np.vstack([quantile_preds[q] for q in sorted_qs])
+
+        # For each sample, sort the quantile values to enforce monotonicity
+        for i in range(n_samples):
+            sample_vals = stacked[:, i]
+
+            # Check if monotonicity is violated
+            if not np.all(np.diff(sample_vals) >= 0):
+                # Sort values to enforce monotonicity
+                stacked[:, i] = np.sort(sample_vals)
+
+        # Unpack back to dictionary
+        fixed_preds = {}
+        for j, q in enumerate(sorted_qs):
+            fixed_preds[q] = stacked[j, :]
+
+        return fixed_preds
 
     def predict_distribution(
         self,

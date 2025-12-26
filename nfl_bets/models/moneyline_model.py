@@ -10,6 +10,7 @@ The model provides:
 - Win probability for each team
 - Confidence estimates
 - Value detection for moneyline bets
+- Optuna hyperparameter optimization for best performance
 """
 from dataclasses import dataclass
 from datetime import datetime
@@ -21,7 +22,16 @@ import numpy as np
 import polars as pl
 from loguru import logger
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, TimeSeriesSplit, StratifiedKFold
+from sklearn.metrics import log_loss, accuracy_score
+
+try:
+    import optuna
+    from optuna.samplers import TPESampler
+    HAS_OPTUNA = True
+except ImportError:
+    HAS_OPTUNA = False
+    optuna = None
 
 try:
     import xgboost as xgb
@@ -575,6 +585,232 @@ class MoneylineModel(BaseModel):
 
         # Sort by importance
         return dict(sorted(importance.items(), key=lambda x: x[1], reverse=True))
+
+    @classmethod
+    def optimize_hyperparameters(
+        cls,
+        X: Union[pl.DataFrame, np.ndarray],
+        y: Union[pl.Series, np.ndarray],
+        n_trials: int = 50,
+        n_cv_splits: int = 5,
+        timeout: Optional[int] = None,
+        study_name: str = "moneyline_model_optimization",
+    ) -> tuple["MoneylineModel", dict[str, Any]]:
+        """
+        Optimize hyperparameters using Optuna with stratified time-series CV.
+
+        Uses TPE sampler for efficient search, optimizing log loss.
+
+        Args:
+            X: Feature matrix
+            y: Target values (1=home win, 0=away win)
+            n_trials: Number of optimization trials
+            n_cv_splits: Number of CV splits
+            timeout: Optional timeout in seconds
+            study_name: Name for the Optuna study
+
+        Returns:
+            Tuple of (optimized model, best hyperparameters)
+        """
+        if not HAS_OPTUNA:
+            raise ImportError("Optuna is required. pip install optuna")
+
+        # Prepare data
+        if isinstance(X, pl.DataFrame):
+            X_arr = X.to_numpy()
+            feature_names = X.columns
+        else:
+            X_arr = np.asarray(X)
+            feature_names = None
+
+        y_arr = y.to_numpy() if isinstance(y, pl.Series) else np.asarray(y)
+
+        logger.info(f"Starting Optuna optimization for moneyline with {n_trials} trials")
+
+        def objective(trial: optuna.Trial) -> float:
+            """Objective function for Optuna optimization."""
+            # XGBoost hyperparameters
+            xgb_params = {
+                "n_estimators": trial.suggest_int("xgb_n_estimators", 100, 800),
+                "max_depth": trial.suggest_int("xgb_max_depth", 3, 8),
+                "learning_rate": trial.suggest_float("xgb_learning_rate", 0.01, 0.3, log=True),
+                "subsample": trial.suggest_float("xgb_subsample", 0.5, 1.0),
+                "colsample_bytree": trial.suggest_float("xgb_colsample_bytree", 0.5, 1.0),
+                "min_child_weight": trial.suggest_int("xgb_min_child_weight", 1, 10),
+                "reg_alpha": trial.suggest_float("xgb_reg_alpha", 1e-3, 10.0, log=True),
+                "reg_lambda": trial.suggest_float("xgb_reg_lambda", 1e-3, 10.0, log=True),
+                "random_state": 42,
+                "n_jobs": -1,
+                "objective": "binary:logistic",
+                "eval_metric": "logloss",
+            }
+
+            # LightGBM hyperparameters
+            lgb_params = {
+                "n_estimators": trial.suggest_int("lgb_n_estimators", 100, 800),
+                "max_depth": trial.suggest_int("lgb_max_depth", 3, 8),
+                "learning_rate": trial.suggest_float("lgb_learning_rate", 0.01, 0.3, log=True),
+                "subsample": trial.suggest_float("lgb_subsample", 0.5, 1.0),
+                "colsample_bytree": trial.suggest_float("lgb_colsample_bytree", 0.5, 1.0),
+                "min_child_samples": trial.suggest_int("lgb_min_child_samples", 5, 50),
+                "reg_alpha": trial.suggest_float("lgb_reg_alpha", 1e-3, 10.0, log=True),
+                "reg_lambda": trial.suggest_float("lgb_reg_lambda", 1e-3, 10.0, log=True),
+                "random_state": 42,
+                "n_jobs": -1,
+                "verbose": -1,
+                "objective": "binary",
+            }
+
+            # LR hyperparameters
+            lr_params = {
+                "C": trial.suggest_float("lr_C", 0.01, 100.0, log=True),
+                "max_iter": 1000,
+                "random_state": 42,
+            }
+
+            # Ensemble weights
+            xgb_weight = trial.suggest_float("xgb_weight", 0.2, 0.7)
+            lgb_weight = trial.suggest_float("lgb_weight", 0.1, 0.5)
+            lr_weight = 1.0 - xgb_weight - lgb_weight
+            if lr_weight < 0.05:
+                return float("inf")
+
+            weights = {
+                "xgb": xgb_weight,
+                "lgb": lgb_weight,
+                "lr": lr_weight,
+            }
+
+            # Stratified K-Fold for classification
+            skf = StratifiedKFold(n_splits=n_cv_splits, shuffle=True, random_state=42)
+            cv_scores = []
+
+            for train_idx, val_idx in skf.split(X_arr, y_arr):
+                X_train, X_val = X_arr[train_idx], X_arr[val_idx]
+                y_train, y_val = y_arr[train_idx], y_arr[val_idx]
+
+                model = cls(
+                    ensemble_weights=weights,
+                    xgb_params=xgb_params,
+                    lgb_params=lgb_params,
+                    lr_params=lr_params,
+                    use_calibration=False,
+                )
+
+                try:
+                    model.train(
+                        X_train, y_train,
+                        validation_data=(X_val, y_val),
+                        early_stopping_rounds=30,
+                        fit_calibrator=False,
+                    )
+
+                    # Calculate log loss on validation
+                    probs = model.predict_proba(X_val)
+                    logloss = log_loss(y_val, probs)
+                    cv_scores.append(logloss)
+
+                except Exception as e:
+                    logger.warning(f"Trial failed: {e}")
+                    return float("inf")
+
+            mean_logloss = np.mean(cv_scores)
+            trial.set_user_attr("cv_scores", cv_scores)
+
+            return mean_logloss
+
+        # Create study
+        sampler = TPESampler(seed=42)
+        study = optuna.create_study(
+            study_name=study_name,
+            direction="minimize",
+            sampler=sampler,
+        )
+
+        study.optimize(
+            objective,
+            n_trials=n_trials,
+            timeout=timeout,
+            show_progress_bar=True,
+        )
+
+        best_params = study.best_params
+        best_logloss = study.best_value
+
+        logger.info(f"Best log loss: {best_logloss:.4f}")
+        logger.info(f"Best params: {best_params}")
+
+        # Build final model
+        xgb_params = {
+            "n_estimators": best_params["xgb_n_estimators"],
+            "max_depth": best_params["xgb_max_depth"],
+            "learning_rate": best_params["xgb_learning_rate"],
+            "subsample": best_params["xgb_subsample"],
+            "colsample_bytree": best_params["xgb_colsample_bytree"],
+            "min_child_weight": best_params["xgb_min_child_weight"],
+            "reg_alpha": best_params["xgb_reg_alpha"],
+            "reg_lambda": best_params["xgb_reg_lambda"],
+            "random_state": 42,
+            "n_jobs": -1,
+            "objective": "binary:logistic",
+            "eval_metric": "logloss",
+        }
+
+        lgb_params = {
+            "n_estimators": best_params["lgb_n_estimators"],
+            "max_depth": best_params["lgb_max_depth"],
+            "learning_rate": best_params["lgb_learning_rate"],
+            "subsample": best_params["lgb_subsample"],
+            "colsample_bytree": best_params["lgb_colsample_bytree"],
+            "min_child_samples": best_params["lgb_min_child_samples"],
+            "reg_alpha": best_params["lgb_reg_alpha"],
+            "reg_lambda": best_params["lgb_reg_lambda"],
+            "random_state": 42,
+            "n_jobs": -1,
+            "verbose": -1,
+            "objective": "binary",
+        }
+
+        lr_params = {
+            "C": best_params["lr_C"],
+            "max_iter": 1000,
+            "random_state": 42,
+        }
+
+        weights = {
+            "xgb": best_params["xgb_weight"],
+            "lgb": best_params["lgb_weight"],
+            "lr": 1.0 - best_params["xgb_weight"] - best_params["lgb_weight"],
+        }
+
+        final_model = cls(
+            ensemble_weights=weights,
+            xgb_params=xgb_params,
+            lgb_params=lgb_params,
+            lr_params=lr_params,
+            use_calibration=True,
+        )
+
+        X_train, X_val, y_train, y_val = train_test_split(
+            X_arr, y_arr, test_size=0.2, random_state=42, stratify=y_arr
+        )
+
+        final_model.train(
+            X_train, y_train,
+            validation_data=(X_val, y_val),
+            early_stopping_rounds=50,
+            fit_calibrator=True,
+        )
+
+        if feature_names is not None:
+            final_model.feature_names = list(feature_names)
+
+        return final_model, {
+            "best_params": best_params,
+            "best_logloss": best_logloss,
+            "n_trials": n_trials,
+            "study_name": study_name,
+        }
 
     def save(self, path: Union[str, Path]) -> None:
         """Save the complete model to disk."""

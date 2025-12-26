@@ -43,6 +43,12 @@ from .depth_chart_analyzer import (
     BackupActivation,
     UsageRedistribution,
 )
+from .weather_features import (
+    WeatherFeatureBuilder,
+    WeatherAPIClient,
+    WeatherData,
+    get_game_weather,
+)
 from .feature_pipeline import (
     FeaturePipeline,
     SpreadPredictionFeatures,
@@ -63,6 +69,7 @@ __all__ = [
     "PlayerFeatureBuilder",
     "GameFeatureBuilder",
     "InjuryFeatureBuilder",
+    "WeatherFeatureBuilder",
     # Injury utilities
     "calculate_injury_adjusted_projection",
     "estimate_injury_variance",
@@ -74,6 +81,10 @@ __all__ = [
     "InjuredPlayer",
     "BackupActivation",
     "UsageRedistribution",
+    # Weather
+    "WeatherAPIClient",
+    "WeatherData",
+    "get_game_weather",
     # Pipeline
     "FeaturePipeline",
     "SpreadPredictionFeatures",
