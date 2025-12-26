@@ -266,12 +266,18 @@ async def poll_odds(
                 feature_errors.append(f"{game_id}: missing season/week")
                 continue
 
+            # NFL season mapping: 2024-25 season games may be labeled as 2025
+            # but we need to use 2024 season PBP data (the actual current season)
+            feature_season = int(season)
+            if feature_season == 2025:
+                feature_season = 2024  # Use current NFL season data
+
             try:
                 game_features = await feature_pipeline.build_spread_features(
                     game_id=game_id,
                     home_team=game.get("home_team"),
                     away_team=game.get("away_team"),
-                    season=int(season),
+                    season=feature_season,
                     week=int(week),
                 )
                 # Extract the features dict from SpreadPredictionFeatures object
