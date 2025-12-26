@@ -394,6 +394,53 @@ async def get_all_predictions(
     }
 
 
+@router.get("/predictions/debug/player-lookup")
+async def debug_player_lookup(
+    request: Request,
+    player_name: str = Query(..., description="Player name to look up"),
+    season: int = Query(2024, description="Season to search"),
+    position: Optional[str] = Query(None, description="Position hint (QB, RB, WR, TE)"),
+) -> dict[str, Any]:
+    """
+    Debug endpoint to test player ID lookup.
+    """
+    app_state = request.app.state.app_state
+
+    if not app_state.feature_pipeline:
+        return {"error": "Feature pipeline not initialized"}
+
+    # Try looking up the player
+    player_id = await app_state.feature_pipeline.lookup_player_id(
+        player_name=player_name,
+        season=season,
+        position=position,
+    )
+
+    # Also check what PBP data is available
+    pbp_info = {}
+    if app_state.pipeline:
+        try:
+            pbp_df = await app_state.pipeline.get_historical_pbp([season])
+            if pbp_df is not None:
+                pbp_info["row_count"] = len(pbp_df)
+                pbp_info["columns"] = list(pbp_df.columns)[:20]
+
+                # Check for sample player names
+                if "passer_player_name" in pbp_df.columns:
+                    sample_passers = pbp_df.select("passer_player_name").unique().head(10).to_series().to_list()
+                    pbp_info["sample_passers"] = [p for p in sample_passers if p is not None]
+        except Exception as e:
+            pbp_info["error"] = str(e)
+
+    return {
+        "player_name": player_name,
+        "season": season,
+        "position": position,
+        "player_id_found": player_id,
+        "pbp_data": pbp_info,
+    }
+
+
 @router.get("/predictions/{game_id}")
 async def get_game_predictions(
     request: Request,
