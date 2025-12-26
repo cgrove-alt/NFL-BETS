@@ -91,6 +91,54 @@ class ModelManager:
             check_staleness=check_staleness,
         )
 
+    def load_moneyline_model(
+        self,
+        version: str = "latest",
+        check_staleness: Optional[bool] = None,
+    ) -> "BaseModel":
+        """
+        Load the moneyline prediction model.
+
+        Args:
+            version: Model version or "latest" for most recent
+            check_staleness: Override auto_check_staleness setting
+
+        Returns:
+            Loaded MoneylineModel
+        """
+        from .moneyline_model import MoneylineModel
+
+        return self._load_model(
+            model_class=MoneylineModel,
+            model_name="moneyline_model",
+            version=version,
+            check_staleness=check_staleness,
+        )
+
+    def load_totals_model(
+        self,
+        version: str = "latest",
+        check_staleness: Optional[bool] = None,
+    ) -> "BaseModel":
+        """
+        Load the totals (over/under) prediction model.
+
+        Args:
+            version: Model version or "latest" for most recent
+            check_staleness: Override auto_check_staleness setting
+
+        Returns:
+            Loaded TotalsModel
+        """
+        from .totals_model import TotalsModel
+
+        return self._load_model(
+            model_class=TotalsModel,
+            model_name="totals_model",
+            version=version,
+            check_staleness=check_staleness,
+        )
+
     def load_prop_model(
         self,
         prop_type: str,
@@ -212,7 +260,7 @@ class ModelManager:
         Check if a model type is stale.
 
         Args:
-            model_type: "spread" or prop type name
+            model_type: "spread", "moneyline", "totals", or prop type name
 
         Returns:
             True if model is stale
@@ -220,6 +268,10 @@ class ModelManager:
         try:
             if model_type == "spread":
                 model = self.load_spread_model(check_staleness=False)
+            elif model_type == "moneyline":
+                model = self.load_moneyline_model(check_staleness=False)
+            elif model_type == "totals":
+                model = self.load_totals_model(check_staleness=False)
             else:
                 model = self.load_prop_model(model_type, check_staleness=False)
 
@@ -232,7 +284,7 @@ class ModelManager:
         Get information about a trained model.
 
         Args:
-            model_type: "spread" or prop type name
+            model_type: "spread", "moneyline", "totals", or prop type name
 
         Returns:
             Dictionary with model metadata
@@ -240,6 +292,10 @@ class ModelManager:
         try:
             if model_type == "spread":
                 model = self.load_spread_model(check_staleness=False)
+            elif model_type == "moneyline":
+                model = self.load_moneyline_model(check_staleness=False)
+            elif model_type == "totals":
+                model = self.load_totals_model(check_staleness=False)
             else:
                 model = self.load_prop_model(model_type, check_staleness=False)
 
@@ -299,7 +355,10 @@ class ModelManager:
         """
         stale_models = []
 
-        model_types = ["spread", "passing_yards", "rushing_yards", "receiving_yards", "receptions"]
+        model_types = [
+            "spread", "moneyline", "totals",
+            "passing_yards", "rushing_yards", "receiving_yards", "receptions"
+        ]
 
         for model_type in model_types:
             if self.is_stale(model_type):

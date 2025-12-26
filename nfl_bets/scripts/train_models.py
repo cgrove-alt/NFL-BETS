@@ -283,6 +283,226 @@ async def train_spread_model(
     logger.info(f"✓ Spread model saved to {model_path}")
 
 
+async def train_moneyline_model(
+    X: pl.DataFrame,
+    y: pl.Series,
+    seasons: list[int],
+    data_cutoff: datetime,
+    output_dir: Path,
+) -> None:
+    """
+    Train and save the moneyline prediction model.
+
+    Args:
+        X: Feature matrix (same as spread features)
+        y: Target values (1 = home win, 0 = away win)
+        seasons: Seasons used for training
+        data_cutoff: Cutoff date of training data
+        output_dir: Directory to save model
+    """
+    from nfl_bets.models.moneyline_model import MoneylineModel
+
+    logger.info("Training moneyline model...")
+
+    # Create model
+    model = MoneylineModel()
+
+    # Split for validation (last 20% of games chronologically)
+    n_val = int(len(X) * 0.2)
+    X_train = X.head(-n_val)
+    y_train = y.head(-n_val)
+    X_val = X.tail(n_val)
+    y_val = y.tail(n_val)
+
+    logger.info(f"Training on {len(X_train)} games, validating on {len(X_val)} games")
+
+    # Train model
+    model.train(
+        X=X_train,
+        y=y_train,
+        validation_data=(X_val, y_val),
+    )
+
+    # Add data cutoff and seasons to metadata
+    if model.metadata:
+        model.metadata.data_cutoff_date = data_cutoff
+        model.metadata.training_seasons = seasons
+
+    # Save model
+    output_dir.mkdir(parents=True, exist_ok=True)
+    model_path = output_dir / f"moneyline_model_v{model.VERSION}.joblib"
+    model.save(model_path)
+
+    # Also save as "latest"
+    latest_path = output_dir / "moneyline_model_latest.joblib"
+    model.save(latest_path)
+
+    logger.info(f"✓ Moneyline model saved to {model_path}")
+
+
+async def build_moneyline_training_dataset(
+    seasons: list[int],
+) -> tuple[pl.DataFrame, pl.Series]:
+    """
+    Build feature matrix and target for moneyline model.
+
+    Uses same features as spread model but binary win/loss target.
+
+    Args:
+        seasons: List of seasons to include
+
+    Returns:
+        Tuple of (X features, y target as binary home win)
+    """
+    from nfl_bets.features.feature_pipeline import FeaturePipeline
+    from nfl_bets.data.pipeline import DataPipeline
+    from nfl_bets.config.settings import get_settings
+
+    settings = get_settings()
+    data_pipeline = DataPipeline.from_settings(settings)
+    feature_pipeline = FeaturePipeline(data_pipeline)
+
+    logger.info("Building moneyline training dataset...")
+
+    # Build training dataset - same as spread
+    df = await feature_pipeline.build_training_dataset(
+        seasons=seasons,
+        target="spread",
+        include_playoffs=True,
+    )
+
+    if len(df) == 0:
+        raise ValueError("No training data generated")
+
+    # Split into features (X) and target (y)
+    # For moneyline, target is 1 if home team won (spread > 0)
+    target_col = "actual_spread"
+    metadata_cols = ["game_id", "season", "week", "home_team", "away_team"]
+    feature_cols = [c for c in df.columns if c != target_col and c not in metadata_cols]
+
+    X = df.select(feature_cols)
+    # Binary target: home win = 1 (spread > 0), away win = 0 (spread < 0)
+    # Exclude ties (spread == 0) for cleaner classification
+    mask = df.get_column(target_col) != 0
+    X = X.filter(mask)
+    y = (df.get_column(target_col).filter(mask) > 0).cast(pl.Int32)
+
+    logger.info(f"Built dataset with {len(X)} games and {len(X.columns)} features")
+
+    return X, y
+
+
+async def train_totals_model(
+    X: pl.DataFrame,
+    y: pl.Series,
+    seasons: list[int],
+    data_cutoff: datetime,
+    output_dir: Path,
+) -> None:
+    """
+    Train and save the totals (over/under) prediction model.
+
+    Args:
+        X: Feature matrix (same as spread features)
+        y: Target values (total points = home + away score)
+        seasons: Seasons used for training
+        data_cutoff: Cutoff date of training data
+        output_dir: Directory to save model
+    """
+    from nfl_bets.models.totals_model import TotalsModel
+
+    logger.info("Training totals model...")
+
+    # Create model
+    model = TotalsModel()
+
+    # Split for validation (last 20% of games chronologically)
+    n_val = int(len(X) * 0.2)
+    X_train = X.head(-n_val)
+    y_train = y.head(-n_val)
+    X_val = X.tail(n_val)
+    y_val = y.tail(n_val)
+
+    logger.info(f"Training on {len(X_train)} games, validating on {len(X_val)} games")
+
+    # Train model
+    model.train(
+        X=X_train,
+        y=y_train,
+        validation_data=(X_val, y_val),
+    )
+
+    # Add data cutoff and seasons to metadata
+    if model.metadata:
+        model.metadata.data_cutoff_date = data_cutoff
+        model.metadata.training_seasons = seasons
+
+    # Evaluate on validation set
+    metrics = model.evaluate(X_val, y_val)
+    logger.info(f"Validation metrics:")
+    logger.info(f"  MAE: {metrics.mae:.2f} points")
+    logger.info(f"  RMSE: {metrics.rmse:.2f} points")
+    logger.info(f"  R²: {metrics.r2:.3f}")
+
+    # Save model
+    output_dir.mkdir(parents=True, exist_ok=True)
+    model_path = output_dir / f"totals_model_v{model.VERSION}.joblib"
+    model.save(model_path)
+
+    # Also save as "latest"
+    latest_path = output_dir / "totals_model_latest.joblib"
+    model.save(latest_path)
+
+    logger.info(f"✓ Totals model saved to {model_path}")
+
+
+async def build_totals_training_dataset(
+    seasons: list[int],
+) -> tuple[pl.DataFrame, pl.Series]:
+    """
+    Build feature matrix and target for totals model.
+
+    Uses same features as spread model but total points target.
+
+    Args:
+        seasons: List of seasons to include
+
+    Returns:
+        Tuple of (X features, y target as total points)
+    """
+    from nfl_bets.features.feature_pipeline import FeaturePipeline
+    from nfl_bets.data.pipeline import DataPipeline
+    from nfl_bets.config.settings import get_settings
+
+    settings = get_settings()
+    data_pipeline = DataPipeline.from_settings(settings)
+    feature_pipeline = FeaturePipeline(data_pipeline)
+
+    logger.info("Building totals training dataset...")
+
+    # Build training dataset with totals target
+    df = await feature_pipeline.build_training_dataset(
+        seasons=seasons,
+        target="total",  # Request total points as target
+        include_playoffs=True,
+    )
+
+    if len(df) == 0:
+        raise ValueError("No training data generated")
+
+    # Split into features (X) and target (y)
+    target_col = "total_points"
+    metadata_cols = ["game_id", "season", "week", "home_team", "away_team"]
+    feature_cols = [c for c in df.columns if c != target_col and c not in metadata_cols]
+
+    X = df.select(feature_cols)
+    y = df.get_column(target_col)
+
+    logger.info(f"Built dataset with {len(X)} games and {len(X.columns)} features")
+
+    return X, y
+
+
 async def train_prop_model(
     prop_type: str,
     pbp_df: pl.DataFrame,
@@ -409,10 +629,24 @@ async def train_all_models(
     X_spread, y_spread = await build_spread_training_dataset(seasons)
     await train_spread_model(X_spread, y_spread, seasons, data_cutoff, output_dir)
 
-    # Step 4: Load data for prop models
+    # Step 4: Train moneyline model (uses same features, different target)
+    try:
+        X_ml, y_ml = await build_moneyline_training_dataset(seasons)
+        await train_moneyline_model(X_ml, y_ml, seasons, data_cutoff, output_dir)
+    except Exception as e:
+        logger.error(f"Failed to train moneyline model: {e}")
+
+    # Step 5: Train totals model
+    try:
+        X_totals, y_totals = await build_totals_training_dataset(seasons)
+        await train_totals_model(X_totals, y_totals, seasons, data_cutoff, output_dir)
+    except Exception as e:
+        logger.error(f"Failed to train totals model: {e}")
+
+    # Step 6: Load data for prop models
     pbp_df, schedules_df = await load_training_data(seasons, force_refresh)
 
-    # Step 5: Train prop models
+    # Step 7: Train prop models
     prop_types = ["passing_yards", "rushing_yards", "receiving_yards", "receptions"]
     for prop_type in prop_types:
         try:
@@ -462,7 +696,7 @@ def main():
     )
     parser.add_argument(
         "--model",
-        choices=["all", "spread", "props"],
+        choices=["all", "spread", "moneyline", "totals", "props"],
         default="all",
         help="Which model(s) to train (default: all)",
     )

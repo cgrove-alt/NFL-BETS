@@ -209,6 +209,8 @@ class ValueDetector:
     def __init__(
         self,
         spread_model=None,
+        moneyline_model=None,
+        totals_model=None,
         prop_models: Optional[dict] = None,
         min_edge: float = DEFAULT_MIN_EDGE,
         min_ev: float = DEFAULT_MIN_EV,
@@ -219,12 +221,16 @@ class ValueDetector:
 
         Args:
             spread_model: Trained SpreadModel for game spread predictions
+            moneyline_model: Trained MoneylineModel for win probability predictions
+            totals_model: Trained TotalsModel for over/under predictions
             prop_models: Dict mapping prop_type to trained prop models
             min_edge: Minimum edge required to flag as value (default 3%)
             min_ev: Minimum expected value required (default 2%)
             remove_vig_in_comparison: If True, compare to no-vig probabilities
         """
         self.spread_model = spread_model
+        self.moneyline_model = moneyline_model
+        self.totals_model = totals_model
         self.prop_models = prop_models or {}
         self.min_edge = min_edge
         self.min_ev = min_ev
@@ -306,6 +312,298 @@ class ValueDetector:
             value_bets=value_bets,
             games_scanned=len(games),
             total_opportunities=len(value_bets),
+        )
+
+    def scan_moneylines(
+        self,
+        games: list[dict],
+        odds_data: list[dict],
+        features: dict[str, dict],
+    ) -> DetectionResult:
+        """
+        Scan moneyline bets for value opportunities.
+
+        Args:
+            games: List of game dicts with game_id, home_team, away_team, game_time
+            odds_data: List of odds dicts with game_id, bookmaker, home_ml_odds, away_ml_odds
+            features: Dict mapping game_id to feature dict
+
+        Returns:
+            DetectionResult with detected value bets
+        """
+        if self.moneyline_model is None:
+            logger.warning("No moneyline model configured")
+            return DetectionResult(value_bets=[], games_scanned=0)
+
+        value_bets = []
+
+        for game in games:
+            game_id = game.get("game_id")
+            if not game_id:
+                continue
+
+            game_features = features.get(game_id)
+            if game_features is None:
+                logger.debug(f"No features for game {game_id}")
+                continue
+
+            # Get model prediction
+            try:
+                prediction = self.moneyline_model.predict_game(
+                    features=game_features,
+                    game_id=game_id,
+                    home_team=game.get("home_team", ""),
+                    away_team=game.get("away_team", ""),
+                )
+            except Exception as e:
+                logger.warning(f"Failed to predict moneyline {game_id}: {e}")
+                continue
+
+            # Find odds for this game
+            game_odds = [o for o in odds_data if o.get("game_id") == game_id]
+
+            for odds in game_odds:
+                # Check home moneyline
+                home_bet = self._evaluate_moneyline_bet(
+                    prediction=prediction,
+                    game=game,
+                    odds=odds,
+                    side="home",
+                )
+                if home_bet:
+                    value_bets.append(home_bet)
+
+                # Check away moneyline
+                away_bet = self._evaluate_moneyline_bet(
+                    prediction=prediction,
+                    game=game,
+                    odds=odds,
+                    side="away",
+                )
+                if away_bet:
+                    value_bets.append(away_bet)
+
+        # Sort by edge
+        value_bets.sort(key=lambda b: b.edge, reverse=True)
+
+        return DetectionResult(
+            value_bets=value_bets,
+            games_scanned=len(games),
+            total_opportunities=len(value_bets),
+        )
+
+    def _evaluate_moneyline_bet(
+        self,
+        prediction,
+        game: dict,
+        odds: dict,
+        side: str,
+    ) -> Optional[ValueBet]:
+        """Evaluate a single moneyline bet for value."""
+        game_id = game.get("game_id")
+        home_team = game.get("home_team", "")
+        away_team = game.get("away_team", "")
+        game_time = game.get("game_time")
+
+        bookmaker = odds.get("bookmaker", "Unknown")
+        home_ml_odds = odds.get("home_ml_odds") or odds.get("home_odds", -150)
+        away_ml_odds = odds.get("away_ml_odds") or odds.get("away_odds", +130)
+
+        if side == "home":
+            market_odds = home_ml_odds
+            opp_odds = away_ml_odds
+            model_prob = prediction.home_win_prob
+            description = f"{home_team} ML"
+        else:
+            market_odds = away_ml_odds
+            opp_odds = home_ml_odds
+            model_prob = prediction.away_win_prob
+            description = f"{away_team} ML"
+
+        # Calculate edge
+        edge, ev, raw_edge = self._calculate_edge_and_ev(
+            model_prob=model_prob,
+            odds=market_odds,
+            opposite_odds=opp_odds,
+        )
+
+        # Check thresholds
+        if edge < self.min_edge or ev < self.min_ev:
+            return None
+
+        # Determine urgency
+        urgency = self._determine_urgency(edge, game_time)
+
+        bet_id = f"{game_id}_{side}_moneyline_{bookmaker}"
+
+        return ValueBet(
+            bet_id=bet_id,
+            bet_type=BetType.MONEYLINE,
+            game_id=game_id,
+            description=description,
+            model_probability=model_prob,
+            model_prediction=prediction.home_win_prob,  # Store home win prob as reference
+            bookmaker=bookmaker,
+            odds=market_odds,
+            implied_probability=float(american_to_implied_probability(market_odds)),
+            line=0.0,  # Moneyline has no line
+            edge=edge,
+            expected_value=ev,
+            raw_edge=raw_edge,
+            urgency=urgency,
+            home_team=home_team,
+            away_team=away_team,
+            game_time=game_time,
+        )
+
+    def scan_totals(
+        self,
+        games: list[dict],
+        odds_data: list[dict],
+        features: dict[str, dict],
+    ) -> DetectionResult:
+        """
+        Scan totals (over/under) bets for value opportunities.
+
+        Args:
+            games: List of game dicts with game_id, home_team, away_team, game_time
+            odds_data: List of odds dicts with game_id, bookmaker, total_line, over_odds, under_odds
+            features: Dict mapping game_id to feature dict
+
+        Returns:
+            DetectionResult with detected value bets
+        """
+        if self.totals_model is None:
+            logger.warning("No totals model configured")
+            return DetectionResult(value_bets=[], games_scanned=0)
+
+        value_bets = []
+
+        for game in games:
+            game_id = game.get("game_id")
+            if not game_id:
+                continue
+
+            game_features = features.get(game_id)
+            if game_features is None:
+                logger.debug(f"No features for game {game_id}")
+                continue
+
+            # Find odds for this game
+            game_odds = [o for o in odds_data if o.get("game_id") == game_id]
+
+            for odds in game_odds:
+                total_line = odds.get("total_line") or odds.get("total")
+                if total_line is None:
+                    continue
+
+                # Get model prediction with line context
+                try:
+                    prediction = self.totals_model.predict_game(
+                        features=game_features,
+                        game_id=game_id,
+                        home_team=game.get("home_team", ""),
+                        away_team=game.get("away_team", ""),
+                        line=float(total_line),
+                        over_odds=odds.get("over_odds", -110),
+                        under_odds=odds.get("under_odds", -110),
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to predict totals {game_id}: {e}")
+                    continue
+
+                # Check over
+                over_bet = self._evaluate_totals_bet(
+                    prediction=prediction,
+                    game=game,
+                    odds=odds,
+                    side="over",
+                )
+                if over_bet:
+                    value_bets.append(over_bet)
+
+                # Check under
+                under_bet = self._evaluate_totals_bet(
+                    prediction=prediction,
+                    game=game,
+                    odds=odds,
+                    side="under",
+                )
+                if under_bet:
+                    value_bets.append(under_bet)
+
+        # Sort by edge
+        value_bets.sort(key=lambda b: b.edge, reverse=True)
+
+        return DetectionResult(
+            value_bets=value_bets,
+            games_scanned=len(games),
+            total_opportunities=len(value_bets),
+        )
+
+    def _evaluate_totals_bet(
+        self,
+        prediction,
+        game: dict,
+        odds: dict,
+        side: str,
+    ) -> Optional[ValueBet]:
+        """Evaluate a single totals bet for value."""
+        game_id = game.get("game_id")
+        home_team = game.get("home_team", "")
+        away_team = game.get("away_team", "")
+        game_time = game.get("game_time")
+
+        bookmaker = odds.get("bookmaker", "Unknown")
+        total_line = odds.get("total_line") or odds.get("total", 47.5)
+        over_odds = odds.get("over_odds", -110)
+        under_odds = odds.get("under_odds", -110)
+
+        if side == "over":
+            market_odds = over_odds
+            opp_odds = under_odds
+            model_prob = prediction.over_prob or 0.5
+            description = f"Over {total_line}"
+        else:
+            market_odds = under_odds
+            opp_odds = over_odds
+            model_prob = prediction.under_prob or 0.5
+            description = f"Under {total_line}"
+
+        # Calculate edge
+        edge, ev, raw_edge = self._calculate_edge_and_ev(
+            model_prob=model_prob,
+            odds=market_odds,
+            opposite_odds=opp_odds,
+        )
+
+        # Check thresholds
+        if edge < self.min_edge or ev < self.min_ev:
+            return None
+
+        # Determine urgency
+        urgency = self._determine_urgency(edge, game_time)
+
+        bet_id = f"{game_id}_{side}_total_{bookmaker}"
+
+        return ValueBet(
+            bet_id=bet_id,
+            bet_type=BetType.TOTAL,
+            game_id=game_id,
+            description=description,
+            model_probability=model_prob,
+            model_prediction=prediction.predicted_total,
+            bookmaker=bookmaker,
+            odds=market_odds,
+            implied_probability=float(american_to_implied_probability(market_odds)),
+            line=float(total_line),
+            edge=edge,
+            expected_value=ev,
+            raw_edge=raw_edge,
+            urgency=urgency,
+            home_team=home_team,
+            away_team=away_team,
+            game_time=game_time,
         )
 
     def _evaluate_spread_bet(

@@ -626,6 +626,10 @@ class FeaturePipeline:
             return await self._build_spread_training_data(
                 pbp_df, schedules_df, seasons, include_playoffs
             )
+        elif target == "total":
+            return await self._build_totals_training_data(
+                pbp_df, schedules_df, seasons, include_playoffs
+            )
         else:
             # Player prop training data
             return await self._build_prop_training_data(
@@ -689,6 +693,69 @@ class FeaturePipeline:
 
         df = pl.DataFrame(results) if results else pl.DataFrame()
         self.logger.info(f"Built training dataset: {len(df)} rows")
+        return df
+
+    async def _build_totals_training_data(
+        self,
+        pbp_df: pl.DataFrame,
+        schedules_df: pl.DataFrame,
+        seasons: list[int],
+        include_playoffs: bool,
+    ) -> pl.DataFrame:
+        """
+        Build training data for totals (over/under) prediction.
+
+        Uses same features as spread model but with total points target.
+        """
+        results = []
+
+        # Filter completed games
+        completed_games = schedules_df.filter(
+            (pl.col("season").is_in(seasons))
+            & (pl.col("home_score").is_not_null())
+            & (pl.col("week") >= 2)  # Need prior data
+        )
+
+        if not include_playoffs:
+            completed_games = completed_games.filter(pl.col("game_type") == "REG")
+
+        total_games = len(completed_games)
+        self.logger.info(f"Processing {total_games} games for totals training")
+
+        for i, row in enumerate(completed_games.iter_rows(named=True)):
+            if i % 50 == 0:
+                self.logger.debug(f"Processing game {i}/{total_games}")
+
+            try:
+                features = await self.build_spread_features(
+                    game_id=row["game_id"],
+                    home_team=row["home_team"],
+                    away_team=row["away_team"],
+                    season=row["season"],
+                    week=row["week"],
+                    pbp_df=pbp_df,
+                    schedules_df=schedules_df,
+                )
+
+                # Target is total points (home + away)
+                total_points = row["home_score"] + row["away_score"]
+
+                result = {
+                    "game_id": row["game_id"],
+                    "season": row["season"],
+                    "week": row["week"],
+                    "home_team": row["home_team"],
+                    "away_team": row["away_team"],
+                    "total_points": total_points,
+                }
+                result.update(features.features)
+                results.append(result)
+
+            except Exception as e:
+                self.logger.warning(f"Failed to process {row['game_id']}: {e}")
+
+        df = pl.DataFrame(results) if results else pl.DataFrame()
+        self.logger.info(f"Built totals training dataset: {len(df)} rows")
         return df
 
     async def build_prop_training_dataset(

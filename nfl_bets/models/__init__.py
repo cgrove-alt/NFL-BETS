@@ -53,6 +53,8 @@ from .evaluation import (
     log_loss,
 )
 from .spread_model import SpreadModel, SpreadPrediction
+from .moneyline_model import MoneylineModel, MoneylinePrediction
+from .totals_model import TotalsModel, TotalsPrediction
 from .player_props import (
     BasePropModel,
     PassingYardsModel,
@@ -93,6 +95,12 @@ __all__ = [
     # Spread model
     "SpreadModel",
     "SpreadPrediction",
+    # Moneyline model
+    "MoneylineModel",
+    "MoneylinePrediction",
+    # Totals model
+    "TotalsModel",
+    "TotalsPrediction",
     # Prop models
     "BasePropModel",
     "PropPrediction",
