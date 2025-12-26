@@ -12,6 +12,8 @@ import logging
 from datetime import datetime
 from typing import Any, Optional
 
+import polars as pl
+
 logger = logging.getLogger(__name__)
 
 # Team name normalization for Odds API full names -> nflverse abbreviations
@@ -251,6 +253,25 @@ async def poll_odds(
             return []
 
         # 3. Build features for each game
+        # Create schedules DataFrame from games data (for game context features)
+        # This ensures we have the current season's schedule info even when using
+        # historical PBP data for team performance metrics
+        schedules_df = pl.DataFrame(games)
+
+        # Determine PBP season - for 2025 labeled games, we need 2024 PBP data
+        # (the actual current NFL season's played games)
+        sample_season = games[0].get("season") if games else None
+        pbp_season = int(sample_season) if sample_season else 2024
+        if pbp_season == 2025:
+            pbp_season = 2024  # Use current NFL season's played data
+
+        # Fetch PBP data once for all games
+        logger.info(f"Fetching PBP data for season {pbp_season}")
+        pbp_df = await pipeline.get_historical_pbp([pbp_season])
+        if pbp_df is None or len(pbp_df) == 0:
+            logger.warning(f"No PBP data available for season {pbp_season}")
+            return []
+
         features = {}
         feature_errors = []
         for game in games:
@@ -266,19 +287,15 @@ async def poll_odds(
                 feature_errors.append(f"{game_id}: missing season/week")
                 continue
 
-            # NFL season mapping: 2024-25 season games may be labeled as 2025
-            # but we need to use 2024 season PBP data (the actual current season)
-            feature_season = int(season)
-            if feature_season == 2025:
-                feature_season = 2024  # Use current NFL season data
-
             try:
                 game_features = await feature_pipeline.build_spread_features(
                     game_id=game_id,
                     home_team=game.get("home_team"),
                     away_team=game.get("away_team"),
-                    season=feature_season,
+                    season=pbp_season,  # Use season with PBP data
                     week=int(week),
+                    pbp_df=pbp_df,  # Pass pre-fetched PBP data
+                    schedules_df=schedules_df,  # Pass current season's schedule
                 )
                 # Extract the features dict from SpreadPredictionFeatures object
                 features[game_id] = game_features.features
