@@ -556,12 +556,142 @@ async def get_game_predictions(
 
     Returns spread prediction and all player prop predictions.
     """
-    result = await get_all_predictions(request, game_id=game_id)
+    # Don't call get_all_predictions() directly - FastAPI Query() params don't work on internal calls
+    # Instead, use getPredictions with query param which works correctly
+    app_state = request.app.state.app_state
 
-    if result.get("games"):
-        return result["games"][0]
+    if not app_state.pipeline or not app_state.feature_pipeline:
+        return {"error": "Pipeline not initialized", "game_id": game_id}
 
-    return {"error": "Game not found", "game_id": game_id}
+    value_detector = app_state.value_detector
+    if not value_detector or not value_detector.prop_models:
+        return {"error": "Prop models not loaded", "game_id": game_id}
+
+    # Get upcoming games and filter to this specific game
+    try:
+        games_df = await app_state.pipeline.get_upcoming_games()
+        if games_df is None or len(games_df) == 0:
+            return {"error": "No upcoming games found", "game_id": game_id}
+        games = games_df.to_dicts()
+    except Exception as e:
+        logger.error(f"Failed to get upcoming games: {e}")
+        return {"error": str(e), "game_id": game_id}
+
+    # Filter to specific game
+    matching_games = [g for g in games if g.get("game_id") == game_id]
+    if not matching_games:
+        return {"error": "Game not found", "game_id": game_id}
+
+    game = matching_games[0]
+    gid = game.get("game_id", "")
+    home_team = game.get("home_team", "")
+    away_team = game.get("away_team", "")
+    season = game.get("season", 2025)
+    week = game.get("week", 1)
+    kickoff = game.get("commence_time") or game.get("gameday") or ""
+
+    if isinstance(kickoff, datetime):
+        kickoff = kickoff.isoformat()
+
+    # Generate predictions for this game
+    player_preds = []
+
+    for team, opponent in [(home_team, away_team), (away_team, home_team)]:
+        team_players = []
+        if app_state.pipeline:
+            try:
+                team_players = await app_state.pipeline.get_key_players_dynamic(
+                    team=team,
+                    season=season,
+                    positions=["QB", "RB", "WR", "TE"],
+                    max_per_position=1,
+                    exclude_injured=False,
+                )
+            except Exception as e:
+                logger.debug(f"ESPN roster lookup failed for {team}: {e}")
+
+        if not team_players:
+            static_players = KEY_PLAYERS.get(team, [])
+            team_players = [
+                {"name": p["name"], "position": p["position"], "injury_status": "UNKNOWN"}
+                for p in static_players
+            ]
+
+        for player_info in team_players:
+            player_name = player_info.get("name", "")
+            position = player_info.get("position", "")
+            injury_status = player_info.get("injury_status", "ACTIVE")
+            prop_types = _get_prop_type_for_position(position)
+
+            player_id = await app_state.feature_pipeline.lookup_player_id(
+                player_name=player_name,
+                season=season,
+                position=position,
+            )
+
+            if not player_id:
+                continue
+
+            for prop_type in prop_types:
+                prop_model = value_detector.prop_models.get(prop_type)
+                if not prop_model:
+                    continue
+
+                try:
+                    features = await app_state.feature_pipeline.build_prop_features(
+                        game_id=gid,
+                        player_id=player_id,
+                        player_name=player_name,
+                        prop_type=prop_type,
+                        season=season,
+                        week=week,
+                        opponent_team=opponent,
+                        position=position,
+                    )
+
+                    if features is None or features.features is None:
+                        continue
+
+                    prediction = prop_model.predict_player(
+                        features=features.features,
+                        player_id=player_id,
+                        player_name=player_name,
+                        game_id=gid,
+                        team=team,
+                        opponent=opponent,
+                        line=None,
+                    )
+
+                    confidence = max(0.5, min(0.95, 1.0 - (prediction.prediction_std / prediction.predicted_value) if prediction.predicted_value > 0 else 0.5))
+
+                    player_preds.append(
+                        PropPredictionResponse(
+                            player_name=player_name,
+                            team=team,
+                            opponent=opponent,
+                            game_id=gid,
+                            prop_type=prop_type,
+                            predicted_value=round(prediction.predicted_value, 1),
+                            range_low=round(prediction.quantile_25, 1),
+                            range_high=round(prediction.quantile_75, 1),
+                            confidence=round(confidence, 2),
+                            injury_status=injury_status,
+                        )
+                    )
+                except Exception as e:
+                    logger.debug(f"Failed to predict {prop_type} for {player_name}: {e}")
+                    continue
+
+    player_preds.sort(key=lambda p: (-p.predicted_value, p.prop_type))
+
+    return GamePredictionsResponse(
+        game_id=gid,
+        home_team=home_team,
+        away_team=away_team,
+        kickoff=kickoff,
+        spread_prediction=None,
+        player_props=player_preds,
+    ).model_dump()
 
 
 @router.get("/predictions/enhanced")

@@ -260,9 +260,11 @@ export async function getPredictions(gameId?: string): Promise<PredictionsRespon
 
 export async function getGamePredictions(gameId: string): Promise<GamePredictions | null> {
   try {
-    const response = await fetchAPI<GamePredictions>(`/api/predictions/${encodeURIComponent(gameId)}`);
-    return response;
-  } catch {
+    // Use query param format - path param version has a bug causing 500 errors
+    const response = await fetchAPI<PredictionsResponse>(`/api/predictions?game_id=${encodeURIComponent(gameId)}`);
+    return response.games?.[0] || null;
+  } catch (err) {
+    console.error('Failed to fetch predictions for game:', gameId, err);
     return null;
   }
 }
