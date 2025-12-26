@@ -245,12 +245,28 @@ export interface PropPrediction {
   bet_confidence?: 'LOW' | 'MEDIUM' | 'HIGH';
 }
 
+export interface SpreadPrediction {
+  predicted_spread: number;
+  prediction_std: number;
+  confidence_low: number;
+  confidence_high: number;
+  home_cover_prob: number;
+  away_cover_prob: number;
+  dk_line?: number;
+  dk_home_odds?: number;
+  dk_away_odds?: number;
+  recommendation?: 'HOME' | 'AWAY';
+  edge?: number;
+  bet_confidence?: 'LOW' | 'MEDIUM' | 'HIGH';
+}
+
 export interface GamePredictions {
   game_id: string;
   home_team: string;
   away_team: string;
   kickoff: string;
   spread_prediction: number | null;
+  spread?: SpreadPrediction;
   player_props: PropPrediction[];
 }
 

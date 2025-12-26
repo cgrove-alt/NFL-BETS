@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { ConfidenceGauge } from './ConfidenceGauge';
-import { GameInfo, ValueBet, PropPrediction, getGamePredictions } from '@/lib/api';
+import { GameInfo, ValueBet, PropPrediction, SpreadPrediction, getGamePredictions } from '@/lib/api';
 
 interface GameDetailModalProps {
   game: GameInfo;
@@ -15,26 +15,34 @@ type BetFilter = 'all' | 'spread' | 'moneyline' | 'total' | 'props';
 export function GameDetailModal({ game, valueBets, onClose }: GameDetailModalProps) {
   const [activeFilter, setActiveFilter] = useState<BetFilter>('all');
   const [propPredictions, setPropPredictions] = useState<PropPrediction[]>([]);
-  const [loadingProps, setLoadingProps] = useState(false);
+  const [spreadPrediction, setSpreadPrediction] = useState<SpreadPrediction | null>(null);
+  const [loadingPredictions, setLoadingPredictions] = useState(false);
+  const [predictionsLoaded, setPredictionsLoaded] = useState(false);
 
-  // Fetch prop predictions when props tab is selected
+  // Fetch predictions when props or spread tab is selected
   useEffect(() => {
-    if (activeFilter === 'props' && propPredictions.length === 0) {
-      setLoadingProps(true);
+    if ((activeFilter === 'props' || activeFilter === 'spread') && !predictionsLoaded) {
+      setLoadingPredictions(true);
       getGamePredictions(game.game_id)
         .then((result) => {
-          if (result && result.player_props) {
-            setPropPredictions(result.player_props);
+          if (result) {
+            if (result.player_props) {
+              setPropPredictions(result.player_props);
+            }
+            if (result.spread) {
+              setSpreadPrediction(result.spread);
+            }
+            setPredictionsLoaded(true);
           }
         })
         .catch((err) => {
-          console.error('Failed to fetch prop predictions:', err);
+          console.error('Failed to fetch predictions:', err);
         })
         .finally(() => {
-          setLoadingProps(false);
+          setLoadingPredictions(false);
         });
     }
-  }, [activeFilter, game.game_id, propPredictions.length]);
+  }, [activeFilter, game.game_id, predictionsLoaded]);
 
   const kickoffDate = new Date(game.kickoff);
 
@@ -217,10 +225,162 @@ export function GameDetailModal({ game, valueBets, onClose }: GameDetailModalPro
             ))}
           </div>
 
+          {/* Spread Tab - Show Spread Prediction */}
+          {activeFilter === 'spread' && (
+            <>
+              {loadingPredictions ? (
+                <div className="text-center py-12 text-gray-500">
+                  <div className="animate-spin text-4xl mb-2">⚙️</div>
+                  <div>Loading spread prediction...</div>
+                </div>
+              ) : spreadPrediction ? (
+                <div className="space-y-4">
+                  {/* Spread Prediction Card */}
+                  <div className={`border rounded-xl p-6 ${
+                    spreadPrediction.recommendation
+                      ? 'bg-gradient-to-r from-green-50 to-emerald-50 border-green-300'
+                      : 'bg-gradient-to-r from-blue-50 to-indigo-50 border-blue-200'
+                  }`}>
+                    <h3 className="text-lg font-bold text-gray-800 mb-4">Model Spread Prediction</h3>
+
+                    <div className="grid grid-cols-2 gap-4 mb-4">
+                      <div className="text-center p-4 bg-white/70 rounded-lg">
+                        <div className="text-sm text-gray-500 uppercase">Model Predicts</div>
+                        <div className="text-3xl font-bold text-blue-700">
+                          {spreadPrediction.predicted_spread > 0 ? '+' : ''}{spreadPrediction.predicted_spread.toFixed(1)}
+                        </div>
+                        <div className="text-sm text-gray-500 mt-1">
+                          {spreadPrediction.predicted_spread < 0 ? game.home_team : game.away_team} favored
+                        </div>
+                      </div>
+                      <div className="text-center p-4 bg-white/70 rounded-lg">
+                        <div className="text-sm text-gray-500 uppercase">Confidence Range</div>
+                        <div className="text-xl font-bold text-gray-700">
+                          {spreadPrediction.confidence_low.toFixed(1)} to {spreadPrediction.confidence_high.toFixed(1)}
+                        </div>
+                        <div className="text-sm text-gray-500 mt-1">
+                          ± {spreadPrediction.prediction_std.toFixed(1)} pts uncertainty
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Cover Probabilities */}
+                    <div className="grid grid-cols-2 gap-4 mb-4">
+                      <div className="text-center p-3 bg-white/50 rounded-lg">
+                        <div className="text-xs text-gray-500 uppercase">{game.home_team} Covers</div>
+                        <div className="text-2xl font-bold text-purple-600">
+                          {(spreadPrediction.home_cover_prob * 100).toFixed(1)}%
+                        </div>
+                      </div>
+                      <div className="text-center p-3 bg-white/50 rounded-lg">
+                        <div className="text-xs text-gray-500 uppercase">{game.away_team} Covers</div>
+                        <div className="text-2xl font-bold text-purple-600">
+                          {(spreadPrediction.away_cover_prob * 100).toFixed(1)}%
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* DraftKings Line and Betting Pick */}
+                    {spreadPrediction.dk_line !== undefined && spreadPrediction.dk_line !== null && (
+                      <div className="mt-4 p-4 bg-white/70 rounded-lg border border-green-200">
+                        <div className="flex justify-between items-center">
+                          <div>
+                            <div className="text-xs text-gray-500 uppercase font-medium">DraftKings Line</div>
+                            <div className="text-2xl font-bold text-gray-800">
+                              {game.home_team} {spreadPrediction.dk_line > 0 ? '+' : ''}{spreadPrediction.dk_line?.toFixed(1)}
+                            </div>
+                            <div className="text-xs text-gray-500">
+                              Home {formatOddsValue(spreadPrediction.dk_home_odds || -110)} / Away {formatOddsValue(spreadPrediction.dk_away_odds || -110)}
+                            </div>
+                          </div>
+                          {spreadPrediction.recommendation && (
+                            <div className="text-center">
+                              <div className={`px-6 py-3 rounded-lg ${
+                                spreadPrediction.recommendation === 'HOME'
+                                  ? 'bg-blue-600 text-white'
+                                  : 'bg-orange-600 text-white'
+                              }`}>
+                                <div className="text-xs font-medium uppercase">Pick</div>
+                                <div className="text-xl font-bold">
+                                  {spreadPrediction.recommendation === 'HOME' ? game.home_team : game.away_team}
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                          <div className="text-right">
+                            <div className="text-xs text-gray-500 uppercase font-medium">Edge</div>
+                            <div className={`text-xl font-bold ${
+                              (spreadPrediction.edge || 0) >= 0.1 ? 'text-green-600' :
+                              (spreadPrediction.edge || 0) >= 0.05 ? 'text-yellow-600' : 'text-gray-600'
+                            }`}>
+                              {((spreadPrediction.edge || 0) * 100).toFixed(1)}%
+                            </div>
+                            {spreadPrediction.bet_confidence && (
+                              <span className={`text-xs px-2 py-0.5 rounded ${
+                                spreadPrediction.bet_confidence === 'HIGH' ? 'bg-green-500 text-white' :
+                                spreadPrediction.bet_confidence === 'MEDIUM' ? 'bg-yellow-500 text-white' :
+                                'bg-gray-400 text-white'
+                              }`}>
+                                {spreadPrediction.bet_confidence}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {!spreadPrediction.dk_line && (
+                      <div className="mt-4 text-sm text-gray-400 italic text-center">
+                        DraftKings spread line not available yet
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Show value bets if any */}
+                  {filteredBets.length > 0 && (
+                    <div className="mt-6">
+                      <h3 className="text-sm font-bold text-green-600 mb-2 uppercase">Spread Value Bets</h3>
+                      <div className="space-y-3">
+                        {filteredBets.map((bet, index) => {
+                          const styles = getUrgencyStyles(bet.urgency);
+                          return (
+                            <div
+                              key={`${bet.game_id}-${bet.bet_type}-${index}`}
+                              className={`${styles.bg} border ${styles.border} rounded-xl p-4`}
+                            >
+                              <div className="flex justify-between items-start">
+                                <div>
+                                  <span className={`text-xs font-bold ${styles.text} uppercase`}>
+                                    {styles.icon} {bet.urgency}
+                                  </span>
+                                  <h4 className="font-bold text-gray-800">{bet.description}</h4>
+                                </div>
+                                <div className="text-right">
+                                  <div className="text-lg font-bold text-green-600">+{(bet.edge * 100).toFixed(1)}%</div>
+                                  <div className="text-sm text-gray-500">{bet.bookmaker}</div>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="text-center py-12 text-gray-500">
+                  <div className="text-4xl mb-2">📊</div>
+                  <div>No spread prediction available yet</div>
+                  <div className="text-sm mt-1">Check back closer to game time</div>
+                </div>
+              )}
+            </>
+          )}
+
           {/* Props Tab - Show Predictions */}
           {activeFilter === 'props' && (
             <>
-              {loadingProps ? (
+              {loadingPredictions ? (
                 <div className="text-center py-12 text-gray-500">
                   <div className="animate-spin text-4xl mb-2">⚙️</div>
                   <div>Loading player predictions...</div>

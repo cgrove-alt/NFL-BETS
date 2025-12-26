@@ -87,6 +87,25 @@ class EnhancedGamePredictionsResponse(BaseModel):
     injury_summary: dict  # Summary of key injuries affecting predictions
 
 
+class SpreadPredictionResponse(BaseModel):
+    """Response model for spread prediction."""
+
+    predicted_spread: float  # Model's predicted spread (negative = home favored)
+    prediction_std: float  # Uncertainty in prediction
+    confidence_low: float  # 25th percentile
+    confidence_high: float  # 75th percentile
+    home_cover_prob: float  # Probability home team covers
+    away_cover_prob: float  # Probability away team covers
+    # DraftKings line info
+    dk_line: Optional[float] = None
+    dk_home_odds: Optional[int] = None
+    dk_away_odds: Optional[int] = None
+    # Betting recommendation
+    recommendation: Optional[str] = None  # "HOME", "AWAY", or None
+    edge: Optional[float] = None  # Edge percentage
+    bet_confidence: Optional[str] = None  # "LOW", "MEDIUM", "HIGH"
+
+
 class GamePredictionsResponse(BaseModel):
     """Response model for predictions for a single game."""
 
@@ -94,7 +113,8 @@ class GamePredictionsResponse(BaseModel):
     home_team: str
     away_team: str
     kickoff: str
-    spread_prediction: Optional[float] = None
+    spread_prediction: Optional[float] = None  # Deprecated: use spread field
+    spread: Optional[SpreadPredictionResponse] = None  # Full spread prediction
     player_props: list[PropPredictionResponse]
 
 
@@ -426,6 +446,125 @@ async def _fetch_draftkings_lines(
     return lines
 
 
+async def _fetch_draftkings_spread(
+    app_state: Any,
+    home_team: str,
+    away_team: str,
+) -> Optional[dict]:
+    """
+    Fetch DraftKings spread line for a game.
+
+    Returns dict with line, home_odds, away_odds or None if not available.
+    """
+    if not hasattr(app_state, 'pipeline') or not app_state.pipeline:
+        return None
+
+    odds_api = getattr(app_state.pipeline, 'odds_api', None)
+    if not odds_api:
+        return None
+
+    try:
+        # Get Odds API events to find event_id for this game
+        events = await odds_api.get_events()
+        if not events:
+            return None
+
+        # Find the event matching our game
+        event_id = None
+        for event in events:
+            event_home = TEAM_NAME_MAP.get(event.get("home_team", ""), "")
+            event_away = TEAM_NAME_MAP.get(event.get("away_team", ""), "")
+            if event_home == home_team and event_away == away_team:
+                event_id = event.get("id")
+                break
+
+        if not event_id:
+            return None
+
+        # Get odds for this event (spreads are included in the event data)
+        for event in events:
+            if event.get("id") != event_id:
+                continue
+
+            for bookmaker in event.get("bookmakers", []):
+                if bookmaker.get("key") != "draftkings":
+                    continue
+
+                for market in bookmaker.get("markets", []):
+                    if market.get("key") != "spreads":
+                        continue
+
+                    outcomes = market.get("outcomes", [])
+                    home_spread = None
+                    home_odds = None
+                    away_odds = None
+
+                    for outcome in outcomes:
+                        team_name = TEAM_NAME_MAP.get(outcome.get("name", ""), "")
+                        if team_name == home_team:
+                            home_spread = outcome.get("point")
+                            home_odds = outcome.get("price")
+                        elif team_name == away_team:
+                            away_odds = outcome.get("price")
+
+                    if home_spread is not None:
+                        return {
+                            "line": home_spread,
+                            "home_odds": home_odds,
+                            "away_odds": away_odds,
+                        }
+
+    except Exception as e:
+        logger.debug(f"Failed to fetch DraftKings spread: {e}")
+
+    return None
+
+
+def _calculate_spread_edge(
+    predicted_spread: float,
+    vegas_line: float,
+    home_cover_prob: float,
+) -> tuple[Optional[str], Optional[float], Optional[str]]:
+    """
+    Calculate spread betting recommendation.
+
+    Args:
+        predicted_spread: Model's predicted spread (negative = home favored)
+        vegas_line: Vegas/DK spread line (negative = home favored)
+        home_cover_prob: Probability home team covers the spread
+
+    Returns (recommendation, edge, confidence)
+    - recommendation: "HOME", "AWAY", or None
+    - edge: edge as probability (e.g., 0.08 = 8%)
+    - confidence: "LOW", "MEDIUM", "HIGH"
+    """
+    if vegas_line is None:
+        return None, None, None
+
+    # Calculate edge based on cover probability vs implied 50%
+    # If home_cover_prob > 0.5, bet HOME; else bet AWAY
+    if home_cover_prob > 0.5:
+        recommendation = "HOME"
+        edge = home_cover_prob - 0.5  # Edge over 50/50
+    else:
+        recommendation = "AWAY"
+        edge = (1 - home_cover_prob) - 0.5
+
+    # Only recommend if edge is significant (> 3%)
+    if edge < 0.03:
+        return None, edge, "LOW"
+
+    # Determine confidence based on edge size
+    if edge >= 0.10:  # 10%+ edge
+        confidence = "HIGH"
+    elif edge >= 0.05:  # 5-10% edge
+        confidence = "MEDIUM"
+    else:  # 3-5% edge
+        confidence = "LOW"
+
+    return recommendation, edge, confidence
+
+
 def _calculate_betting_edge(
     predicted_value: float,
     line: float,
@@ -545,13 +684,72 @@ async def get_all_predictions(
         if isinstance(kickoff, datetime):
             kickoff = kickoff.isoformat()
 
-        # Get spread prediction if available
-        spread_pred = None
-        # TODO: Add spread model prediction here
+        # Generate spread prediction using spread model
+        spread_response = None
+        spread_pred = None  # Legacy field
 
-        # Fetch DraftKings lines for this game
+        spread_model = value_detector.spread_model
+        if spread_model:
+            try:
+                # Build spread features
+                spread_features = await app_state.feature_pipeline.build_spread_features(
+                    game_id=gid,
+                    home_team=home_team,
+                    away_team=away_team,
+                    season=season,
+                    week=int(week),
+                )
+
+                if spread_features and spread_features.features:
+                    # Get spread prediction
+                    spread_prediction = spread_model.predict_game(
+                        features=spread_features.features,
+                        game_id=gid,
+                        home_team=home_team,
+                        away_team=away_team,
+                        line=None,  # No line yet, will add DK line below
+                    )
+
+                    spread_pred = round(spread_prediction.predicted_spread, 1)
+
+                    # Fetch DraftKings spread line
+                    dk_spread = await _fetch_draftkings_spread(app_state, home_team, away_team)
+
+                    # Calculate betting recommendation if DK line available
+                    recommendation = None
+                    edge = None
+                    bet_confidence = None
+
+                    if dk_spread:
+                        recommendation, edge, bet_confidence = _calculate_spread_edge(
+                            predicted_spread=spread_prediction.predicted_spread,
+                            vegas_line=dk_spread.get("line"),
+                            home_cover_prob=spread_prediction.home_cover_prob,
+                        )
+
+                    spread_response = SpreadPredictionResponse(
+                        predicted_spread=round(spread_prediction.predicted_spread, 1),
+                        prediction_std=round(spread_prediction.prediction_std, 2),
+                        confidence_low=round(spread_prediction.confidence_lower, 1),
+                        confidence_high=round(spread_prediction.confidence_upper, 1),
+                        home_cover_prob=round(spread_prediction.home_cover_prob, 3),
+                        away_cover_prob=round(spread_prediction.away_cover_prob, 3),
+                        dk_line=dk_spread.get("line") if dk_spread else None,
+                        dk_home_odds=dk_spread.get("home_odds") if dk_spread else None,
+                        dk_away_odds=dk_spread.get("away_odds") if dk_spread else None,
+                        recommendation=recommendation,
+                        edge=round(edge, 4) if edge is not None else None,
+                        bet_confidence=bet_confidence,
+                    )
+
+                    logger.info(f"Spread prediction for {gid}: {spread_pred} (DK: {dk_spread.get('line') if dk_spread else 'N/A'})")
+
+            except Exception as e:
+                logger.warning(f"Failed to generate spread prediction for {gid}: {e}")
+
+        # Fetch DraftKings prop lines for this game
         dk_lines = await _fetch_draftkings_lines(app_state, home_team, away_team)
-        logger.info(f"Got {len(dk_lines)} DraftKings lines for {away_team} @ {home_team}")
+        logger.info(f"Got {len(dk_lines)} DraftKings prop lines for {away_team} @ {home_team}")
 
         # Get player predictions for both teams
         player_preds = []
@@ -692,6 +890,7 @@ async def get_all_predictions(
                 away_team=away_team,
                 kickoff=kickoff,
                 spread_prediction=spread_pred,
+                spread=spread_response,
                 player_props=player_preds,
             )
         )
@@ -817,11 +1016,70 @@ async def get_game_predictions(
     if isinstance(kickoff, datetime):
         kickoff = kickoff.isoformat()
 
-    # Fetch DraftKings lines for this game
-    dk_lines = await _fetch_draftkings_lines(app_state, home_team, away_team)
-    logger.info(f"[{game_id}] Got {len(dk_lines)} DraftKings lines")
+    # Generate spread prediction
+    spread_response = None
+    spread_pred = None
 
-    # Generate predictions for this game
+    spread_model = value_detector.spread_model
+    if spread_model:
+        try:
+            spread_features = await app_state.feature_pipeline.build_spread_features(
+                game_id=gid,
+                home_team=home_team,
+                away_team=away_team,
+                season=season,
+                week=int(week),
+            )
+
+            if spread_features and spread_features.features:
+                spread_prediction = spread_model.predict_game(
+                    features=spread_features.features,
+                    game_id=gid,
+                    home_team=home_team,
+                    away_team=away_team,
+                    line=None,
+                )
+
+                spread_pred = round(spread_prediction.predicted_spread, 1)
+
+                dk_spread = await _fetch_draftkings_spread(app_state, home_team, away_team)
+
+                recommendation = None
+                edge = None
+                bet_confidence = None
+
+                if dk_spread:
+                    recommendation, edge, bet_confidence = _calculate_spread_edge(
+                        predicted_spread=spread_prediction.predicted_spread,
+                        vegas_line=dk_spread.get("line"),
+                        home_cover_prob=spread_prediction.home_cover_prob,
+                    )
+
+                spread_response = SpreadPredictionResponse(
+                    predicted_spread=round(spread_prediction.predicted_spread, 1),
+                    prediction_std=round(spread_prediction.prediction_std, 2),
+                    confidence_low=round(spread_prediction.confidence_lower, 1),
+                    confidence_high=round(spread_prediction.confidence_upper, 1),
+                    home_cover_prob=round(spread_prediction.home_cover_prob, 3),
+                    away_cover_prob=round(spread_prediction.away_cover_prob, 3),
+                    dk_line=dk_spread.get("line") if dk_spread else None,
+                    dk_home_odds=dk_spread.get("home_odds") if dk_spread else None,
+                    dk_away_odds=dk_spread.get("away_odds") if dk_spread else None,
+                    recommendation=recommendation,
+                    edge=round(edge, 4) if edge is not None else None,
+                    bet_confidence=bet_confidence,
+                )
+
+                logger.info(f"[{game_id}] Spread prediction: {spread_pred}")
+
+        except Exception as e:
+            logger.warning(f"[{game_id}] Failed to generate spread prediction: {e}")
+
+    # Fetch DraftKings prop lines for this game
+    dk_lines = await _fetch_draftkings_lines(app_state, home_team, away_team)
+    logger.info(f"[{game_id}] Got {len(dk_lines)} DraftKings prop lines")
+
+    # Generate player prop predictions
     player_preds = []
 
     for team, opponent in [(home_team, away_team), (away_team, home_team)]:
@@ -942,7 +1200,8 @@ async def get_game_predictions(
         home_team=home_team,
         away_team=away_team,
         kickoff=kickoff,
-        spread_prediction=None,
+        spread_prediction=spread_pred,
+        spread=spread_response,
         player_props=player_preds,
     ).model_dump()
 
