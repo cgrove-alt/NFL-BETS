@@ -25,6 +25,7 @@ from .sources.odds_api import OddsAPIClient
 from .sources.pff_client import PFFClient
 from .sources.ftn_dvoa import FTNDVOAClient
 from .sources.sic_score import SICScoreClient
+from .sources.espn_client import ESPNClient
 from .cache.cache_manager import CacheManager
 
 
@@ -171,6 +172,7 @@ class DataPipeline:
         pff: Optional[PFFClient] = None,
         ftn: Optional[FTNDVOAClient] = None,
         sic: Optional[SICScoreClient] = None,
+        espn: Optional[ESPNClient] = None,
         cache: Optional[CacheManager] = None,
         data_dir: Optional[Path] = None,
     ):
@@ -185,6 +187,7 @@ class DataPipeline:
         self.pff = pff
         self.ftn = ftn
         self.sic = sic
+        self.espn = espn or ESPNClient()  # ESPN is free, always enable
 
         # Cache manager
         self.cache = cache or CacheManager.create_sqlite_cache(
@@ -265,12 +268,16 @@ class DataPipeline:
         # Cache
         cache = CacheManager.create_from_settings(settings)
 
+        # ESPN (always enabled - free API)
+        espn = ESPNClient()
+
         return cls(
             nflverse=nflverse,
             odds_api=odds_api,
             pff=pff,
             ftn=ftn,
             sic=sic,
+            espn=espn,
             cache=cache,
             data_dir=data_dir,
         )
@@ -293,6 +300,7 @@ class DataPipeline:
             ("pff", self.pff),
             ("ftn", self.ftn),
             ("sic", self.sic),
+            ("espn", self.espn),
         ]
 
         for name, source in sources:
@@ -737,6 +745,71 @@ class DataPipeline:
 
         return results
 
+    async def get_key_players_dynamic(
+        self,
+        team: str,
+        season: int,
+        positions: Optional[list[str]] = None,
+        max_per_position: int = 2,
+        exclude_injured: bool = True,
+    ) -> list[dict[str, Any]]:
+        """
+        Get key players for a team dynamically from ESPN.
+
+        This replaces hardcoded KEY_PLAYERS with real-time roster data.
+
+        Args:
+            team: Team abbreviation (e.g., "KC", "BUF")
+            season: NFL season year
+            positions: Positions to include (default: QB, RB, WR, TE)
+            max_per_position: Max players per position
+            exclude_injured: Whether to exclude OUT/IR players
+
+        Returns:
+            List of player dicts with name, position, injury_status
+        """
+        team = self.standardize_team_name(team)
+
+        if self.espn is None:
+            self.logger.warning("ESPN client not available")
+            return []
+
+        try:
+            return await self.espn.get_key_players(
+                team=team,
+                season=season,
+                positions=positions,
+                max_per_position=max_per_position,
+                exclude_injured=exclude_injured,
+            )
+        except Exception as e:
+            self.logger.warning(f"Failed to get key players for {team}: {e}")
+            return []
+
+    async def get_team_injuries_espn(
+        self,
+        team: str,
+    ) -> pl.DataFrame:
+        """
+        Get real-time injury report from ESPN.
+
+        Args:
+            team: Team abbreviation
+
+        Returns:
+            DataFrame with injury data
+        """
+        team = self.standardize_team_name(team)
+
+        if self.espn is None:
+            return pl.DataFrame()
+
+        try:
+            return await self.espn.get_team_injuries(team)
+        except Exception as e:
+            self.logger.warning(f"Failed to get ESPN injuries for {team}: {e}")
+            return pl.DataFrame()
+
     async def close(self) -> None:
         """Close all data source connections."""
         if self.odds_api:
@@ -747,6 +820,8 @@ class DataPipeline:
             await self.ftn.close()
         if self.sic:
             await self.sic.close()
+        if self.espn:
+            await self.espn.close()
         if self.cache:
             await self.cache.close()
 

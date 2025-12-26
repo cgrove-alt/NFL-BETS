@@ -23,6 +23,7 @@ class PropPredictionResponse(BaseModel):
     range_low: float  # 25th percentile
     range_high: float  # 75th percentile
     confidence: float  # Based on prediction std
+    injury_status: Optional[str] = None  # ACTIVE, QUESTIONABLE, OUT, etc.
 
 
 class GamePredictionsResponse(BaseModel):
@@ -300,11 +301,32 @@ async def get_all_predictions(
         player_preds = []
 
         for team, opponent in [(home_team, away_team), (away_team, home_team)]:
-            team_players = KEY_PLAYERS.get(team, [])
+            # Try dynamic roster from ESPN first, fall back to static KEY_PLAYERS
+            team_players = []
+            if app_state.pipeline:
+                try:
+                    team_players = await app_state.pipeline.get_key_players_dynamic(
+                        team=team,
+                        season=season,
+                        positions=["QB", "RB", "WR", "TE"],
+                        max_per_position=1,
+                        exclude_injured=False,  # Include injured players, show status
+                    )
+                except Exception as e:
+                    logger.debug(f"ESPN roster lookup failed for {team}: {e}")
+
+            # Fall back to static roster if ESPN fails
+            if not team_players:
+                static_players = KEY_PLAYERS.get(team, [])
+                team_players = [
+                    {"name": p["name"], "position": p["position"], "injury_status": "UNKNOWN"}
+                    for p in static_players
+                ]
 
             for player_info in team_players:
-                player_name = player_info["name"]
-                position = player_info["position"]
+                player_name = player_info.get("name", "")
+                position = player_info.get("position", "")
+                injury_status = player_info.get("injury_status", "ACTIVE")
                 prop_types = _get_prop_type_for_position(position)
 
                 # Look up the real nflverse player_id from name
@@ -366,6 +388,7 @@ async def get_all_predictions(
                                 range_low=round(prediction.quantile_25, 1),
                                 range_high=round(prediction.quantile_75, 1),
                                 confidence=round(confidence, 2),
+                                injury_status=injury_status,
                             )
                         )
 
