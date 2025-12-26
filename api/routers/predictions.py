@@ -423,12 +423,30 @@ async def debug_player_lookup(
             pbp_df = await app_state.pipeline.get_historical_pbp([season])
             if pbp_df is not None:
                 pbp_info["row_count"] = len(pbp_df)
-                pbp_info["columns"] = list(pbp_df.columns)[:20]
+                pbp_info["all_columns"] = list(pbp_df.columns)
+                pbp_info["has_passer_player_name"] = "passer_player_name" in pbp_df.columns
+                pbp_info["has_passer_id"] = "passer_id" in pbp_df.columns
 
                 # Check for sample player names
                 if "passer_player_name" in pbp_df.columns:
                     sample_passers = pbp_df.select("passer_player_name").unique().head(10).to_series().to_list()
                     pbp_info["sample_passers"] = [p for p in sample_passers if p is not None]
+
+                    # Also show what we're searching for
+                    parts = player_name.strip().split()
+                    if len(parts) >= 2:
+                        abbrev = f"{parts[0][0]}.{parts[-1]}"
+                    else:
+                        abbrev = player_name
+                    pbp_info["searching_for_abbrev"] = abbrev.lower()
+                    pbp_info["searching_for_full"] = player_name.lower()
+
+                    # Try to find exact match
+                    import polars as pl
+                    exact_matches = pbp_df.filter(
+                        pl.col("passer_player_name").str.to_lowercase() == abbrev.lower()
+                    ).select("passer_id", "passer_player_name").unique().head(3).to_dicts()
+                    pbp_info["exact_matches"] = exact_matches
         except Exception as e:
             pbp_info["error"] = str(e)
 
