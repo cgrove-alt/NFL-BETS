@@ -391,3 +391,82 @@ def estimate_injury_variance(
     history_factor = 1.0 + (0.1 * min(injury_history, 5))
 
     return base_variance * history_factor
+
+
+def calculate_uncertainty_multiplier(
+    status: str,
+    is_backup_starter: bool = False,
+) -> float:
+    """
+    Calculate uncertainty multiplier for prediction intervals.
+
+    Used to widen prediction ranges for uncertain situations:
+    - Questionable/Doubtful players have uncertain availability
+    - Backup players stepping into starter roles have role uncertainty
+
+    Args:
+        status: Player's injury status
+        is_backup_starter: Whether player is a backup becoming starter
+
+    Returns:
+        Multiplier for prediction std (1.0 = normal, >1.0 = wider intervals)
+    """
+    status_lower = status.lower()
+
+    # Base uncertainty from status
+    if status_lower in ["out", "ir", "pup", "nfi"]:
+        return 0.0  # Not playing
+    elif status_lower == "doubtful":
+        base = 2.0
+    elif status_lower == "questionable":
+        base = 1.5
+    elif status_lower == "probable":
+        base = 1.1
+    else:
+        base = 1.0
+
+    # Additional uncertainty for backup stepping into starter role
+    if is_backup_starter:
+        base *= 1.5
+
+    return base
+
+
+def apply_usage_boosts(
+    features: dict[str, float],
+    boosts: dict[str, float],
+) -> dict[str, float]:
+    """
+    Apply usage boost multipliers to feature values.
+
+    Args:
+        features: Original feature dict
+        boosts: Boost multipliers (e.g., {"targets_5g": 1.25})
+
+    Returns:
+        Features with boosts applied
+    """
+    result = features.copy()
+
+    for feature_name, value in result.items():
+        # Match feature name to boost key
+        for boost_key, multiplier in boosts.items():
+            # Check if feature name contains the boost key
+            if boost_key in feature_name or feature_name.startswith(boost_key):
+                result[feature_name] = value * multiplier
+                break
+
+    return result
+
+
+# Mapping from boost keys to feature name patterns
+BOOST_TO_FEATURE_MAP = {
+    "targets": ["targets_5g", "targets_3g", "targets_10g"],
+    "target_share": ["target_share_5g", "target_share_3g"],
+    "carries": ["carries_5g", "carries_3g", "carries_10g"],
+    "rushing_yards": ["rushing_yards_5g"],
+    "receiving_yards": ["receiving_yards_5g"],
+    "pass_attempts": ["pass_attempts_5g"],
+    "passing_yards": ["passing_yards_5g"],
+    "air_yards": ["air_yards_5g"],
+}

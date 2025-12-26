@@ -33,11 +33,21 @@ from .injury_features import (
     InjuryFeatureBuilder,
     calculate_injury_adjusted_projection,
     estimate_injury_variance,
+    calculate_uncertainty_multiplier,
+    apply_usage_boosts,
+)
+from .depth_chart_analyzer import (
+    DepthChartAnalyzer,
+    InjuryImpactAnalysis,
+    InjuredPlayer,
+    BackupActivation,
+    UsageRedistribution,
 )
 from .feature_pipeline import (
     FeaturePipeline,
     SpreadPredictionFeatures,
     PropPredictionFeatures,
+    InjuryAdjustedPropFeatures,
     create_feature_pipeline,
 )
 
@@ -56,9 +66,18 @@ __all__ = [
     # Injury utilities
     "calculate_injury_adjusted_projection",
     "estimate_injury_variance",
+    "calculate_uncertainty_multiplier",
+    "apply_usage_boosts",
+    # Depth chart analysis
+    "DepthChartAnalyzer",
+    "InjuryImpactAnalysis",
+    "InjuredPlayer",
+    "BackupActivation",
+    "UsageRedistribution",
     # Pipeline
     "FeaturePipeline",
     "SpreadPredictionFeatures",
     "PropPredictionFeatures",
+    "InjuryAdjustedPropFeatures",
     "create_feature_pipeline",
 ]

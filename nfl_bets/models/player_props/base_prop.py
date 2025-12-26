@@ -572,6 +572,117 @@ class BasePropModel(BaseModel):
             model_version=self.VERSION,
         )
 
+    def predict_player_with_uncertainty(
+        self,
+        features: Union[dict, pl.DataFrame, np.ndarray],
+        player_id: str,
+        player_name: str,
+        game_id: str,
+        team: str,
+        opponent: str,
+        line: Optional[float] = None,
+        uncertainty_multiplier: float = 1.0,
+    ) -> PropPrediction:
+        """
+        Make a player prop prediction with adjusted uncertainty.
+
+        Widens prediction intervals based on uncertainty multiplier.
+        Used for:
+        - Questionable/Doubtful players (higher uncertainty)
+        - Backup players stepping into starter roles
+        - Players with injured teammates (usage uncertainty)
+
+        Args:
+            features: Feature values for the player/game
+            player_id: Player's unique identifier
+            player_name: Player's name
+            game_id: Game identifier
+            team: Player's team
+            opponent: Opposing team
+            line: Optional betting line
+            uncertainty_multiplier: Multiplier for prediction intervals
+                - 1.0 = normal (healthy starter)
+                - 1.5 = moderate (Questionable or backup)
+                - 2.0+ = high (Doubtful or limited backup data)
+
+        Returns:
+            PropPrediction with widened intervals
+        """
+        self._validate_fitted()
+
+        # Get base prediction
+        base_pred = self.predict_player(
+            features=features,
+            player_id=player_id,
+            player_name=player_name,
+            game_id=game_id,
+            team=team,
+            opponent=opponent,
+            line=line,
+        )
+
+        # If no uncertainty adjustment needed, return base
+        if uncertainty_multiplier == 1.0:
+            return base_pred
+
+        # Widen the distribution from the median
+        median = base_pred.quantile_50
+
+        # Adjust quantiles by multiplying the distance from median
+        adjusted_q10 = median - (median - base_pred.quantile_10) * uncertainty_multiplier
+        adjusted_q25 = median - (median - base_pred.quantile_25) * uncertainty_multiplier
+        adjusted_q75 = median + (base_pred.quantile_75 - median) * uncertainty_multiplier
+        adjusted_q90 = median + (base_pred.quantile_90 - median) * uncertainty_multiplier
+
+        # Ensure non-negative values (can't have negative yards/receptions)
+        adjusted_q10 = max(0.0, adjusted_q10)
+        adjusted_q25 = max(0.0, adjusted_q25)
+
+        # Adjust std
+        adjusted_std = base_pred.prediction_std * uncertainty_multiplier
+
+        # Recalculate over/under probabilities with wider distribution
+        # The wider distribution means probabilities move toward 0.5
+        over_prob = base_pred.over_prob
+        under_prob = base_pred.under_prob
+        edge = base_pred.edge
+
+        if line is not None and over_prob is not None:
+            # Use normal distribution approximation with wider std
+            # This makes the probability closer to 0.5 as uncertainty increases
+            z_score = (line - median) / adjusted_std if adjusted_std > 0 else 0
+            over_prob = 1 - stats.norm.cdf(z_score)
+            under_prob = 1 - over_prob
+            edge = abs(over_prob - 0.5)
+
+            # Apply calibration if available
+            if self.calibrator is not None:
+                over_prob = float(self.calibrator.calibrate(np.array([over_prob]))[0])
+                under_prob = 1 - over_prob
+                edge = abs(over_prob - 0.5)
+
+        return PropPrediction(
+            player_id=player_id,
+            player_name=player_name,
+            game_id=game_id,
+            prop_type=self.prop_type,
+            team=team,
+            opponent=opponent,
+            predicted_value=median,
+            prediction_mean=median,
+            prediction_std=adjusted_std,
+            quantile_10=adjusted_q10,
+            quantile_25=adjusted_q25,
+            quantile_50=median,
+            quantile_75=adjusted_q75,
+            quantile_90=adjusted_q90,
+            line=line,
+            over_prob=over_prob,
+            under_prob=under_prob,
+            edge=edge,
+            model_version=self.VERSION,
+        )
+
     def get_optimal_line(
         self,
         X: Union[pl.DataFrame, np.ndarray],

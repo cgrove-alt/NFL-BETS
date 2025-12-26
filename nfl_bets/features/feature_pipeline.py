@@ -17,7 +17,12 @@ from .base import FeatureSet, FeatureScaler, fill_missing_features
 from .team_features import TeamFeatureBuilder
 from .player_features import PlayerFeatureBuilder
 from .game_features import GameFeatureBuilder
-from .injury_features import InjuryFeatureBuilder
+from .injury_features import (
+    InjuryFeatureBuilder,
+    calculate_uncertainty_multiplier,
+    apply_usage_boosts,
+)
+from .depth_chart_analyzer import DepthChartAnalyzer
 
 
 @dataclass
@@ -51,6 +56,37 @@ class PropPredictionFeatures:
     features: dict[str, float]
     feature_names: list[str]
     computed_at: datetime
+
+    def to_array(self) -> list[float]:
+        """Convert to ordered array for model input."""
+        return [self.features.get(name, 0.0) for name in self.feature_names]
+
+    def to_polars(self) -> pl.DataFrame:
+        """Convert to single-row Polars DataFrame."""
+        return pl.DataFrame([self.features])
+
+
+@dataclass
+class InjuryAdjustedPropFeatures:
+    """Features with injury adjustments for prop prediction."""
+
+    game_id: str
+    player_id: str
+    player_name: str
+    prop_type: str
+    features: dict[str, float]
+    feature_names: list[str]
+    computed_at: datetime
+    # Injury context
+    injury_status: str
+    uncertainty_multiplier: float
+    is_backup_starter: bool = False
+    replacing_player: Optional[str] = None
+    usage_boosts_applied: dict[str, float] = None
+
+    def __post_init__(self):
+        if self.usage_boosts_applied is None:
+            self.usage_boosts_applied = {}
 
     def to_array(self) -> list[float]:
         """Convert to ordered array for model input."""
@@ -163,10 +199,12 @@ class FeaturePipeline:
     def __init__(
         self,
         data_pipeline=None,
+        espn_client=None,
         cache=None,
         cache_ttl_seconds: int = 21600,
     ):
         self.data_pipeline = data_pipeline
+        self.espn_client = espn_client
         self.cache = cache
         self.cache_ttl_seconds = cache_ttl_seconds
 
@@ -175,6 +213,11 @@ class FeaturePipeline:
         self.player_builder = PlayerFeatureBuilder(cache=cache)
         self.game_builder = GameFeatureBuilder(cache=cache)
         self.injury_builder = InjuryFeatureBuilder(cache=cache)
+
+        # Initialize depth chart analyzer if ESPN client provided
+        self.depth_analyzer: Optional[DepthChartAnalyzer] = None
+        if espn_client:
+            self.depth_analyzer = DepthChartAnalyzer(espn_client)
 
         # Feature scaler (fitted during training)
         self.scaler: Optional[FeatureScaler] = None
@@ -778,9 +821,206 @@ class FeaturePipeline:
         else:
             return self.PROP_FEATURE_NAMES
 
+    async def build_injury_adjusted_prop_features(
+        self,
+        game_id: str,
+        player_id: str,
+        player_name: str,
+        prop_type: str,
+        season: int,
+        week: int,
+        opponent_team: str,
+        player_team: str,
+        position: str,
+        pbp_df: Optional[pl.DataFrame] = None,
+        odds_data: Optional[dict] = None,
+    ) -> InjuryAdjustedPropFeatures:
+        """
+        Build prop features with full injury context adjustments.
+
+        Includes:
+        - Usage boosts from injured teammates
+        - Uncertainty multiplier for prediction intervals
+        - Backup player role detection
+
+        Args:
+            game_id: Unique game identifier
+            player_id: ESPN player ID
+            player_name: Player's name
+            prop_type: Type of prop (passing_yards, etc.)
+            season: NFL season year
+            week: Week number
+            opponent_team: Opposing team abbreviation
+            player_team: Player's team abbreviation
+            position: Player position
+            pbp_df: Optional play-by-play data
+            odds_data: Optional odds data
+
+        Returns:
+            InjuryAdjustedPropFeatures with uncertainty and usage adjustments
+        """
+        self.logger.debug(f"Building injury-adjusted features: {player_name}")
+
+        # Build base features
+        base_features = await self.build_prop_features(
+            game_id=game_id,
+            player_id=player_id,
+            player_name=player_name,
+            prop_type=prop_type,
+            season=season,
+            week=week,
+            opponent_team=opponent_team,
+            position=position,
+            pbp_df=pbp_df,
+            odds_data=odds_data,
+        )
+
+        # Default values if no depth analyzer
+        injury_status = "ACTIVE"
+        uncertainty_multiplier = 1.0
+        is_backup_starter = False
+        replacing_player = None
+        usage_boosts = {}
+
+        if self.depth_analyzer:
+            try:
+                # Get injury context for this player
+                context = await self.depth_analyzer.get_player_injury_context(
+                    player_id=player_id,
+                    team=player_team,
+                    position=position,
+                    season=season,
+                )
+
+                injury_status = context.get("injury_status", "ACTIVE")
+                is_backup_starter = context.get("is_backup_starter", False)
+                replacing_player = context.get("replacing_player")
+                usage_boosts = context.get("teammate_injury_boosts", {})
+                uncertainty_multiplier = context.get("uncertainty_multiplier", 1.0)
+
+            except Exception as e:
+                self.logger.warning(f"Failed to get injury context: {e}")
+
+        # Apply usage boosts to features
+        adjusted_features = base_features.features.copy()
+        if usage_boosts:
+            adjusted_features = apply_usage_boosts(adjusted_features, usage_boosts)
+
+        return InjuryAdjustedPropFeatures(
+            game_id=game_id,
+            player_id=player_id,
+            player_name=player_name,
+            prop_type=prop_type,
+            features=adjusted_features,
+            feature_names=base_features.feature_names,
+            computed_at=datetime.now(),
+            injury_status=injury_status,
+            uncertainty_multiplier=uncertainty_multiplier,
+            is_backup_starter=is_backup_starter,
+            replacing_player=replacing_player,
+            usage_boosts_applied=usage_boosts,
+        )
+
+    async def get_backup_player_features(
+        self,
+        team: str,
+        season: int,
+        week: int,
+        opponent_team: str,
+        prop_types: list[str],
+        pbp_df: Optional[pl.DataFrame] = None,
+        odds_data: Optional[dict] = None,
+    ) -> list[InjuryAdjustedPropFeatures]:
+        """
+        Get features for backup players stepping into starter roles.
+
+        Identifies players who are backups filling in for injured starters
+        and builds predictions for them with appropriate usage boosts.
+
+        Args:
+            team: Team abbreviation
+            season: NFL season year
+            week: Week number
+            opponent_team: Opposing team
+            prop_types: List of prop types to generate features for
+            pbp_df: Optional play-by-play data
+            odds_data: Optional odds data
+
+        Returns:
+            List of InjuryAdjustedPropFeatures for backup players
+        """
+        if not self.depth_analyzer:
+            self.logger.warning("Depth analyzer not available for backup predictions")
+            return []
+
+        results = []
+
+        try:
+            # Analyze injury impact for team
+            analysis = await self.depth_analyzer.analyze_injury_impact(team, season)
+
+            # Generate features for each backup activation
+            for activation in analysis.backup_activations:
+                position = activation.position
+
+                # Determine which prop types apply to this position
+                applicable_props = self._get_props_for_position(position, prop_types)
+
+                for prop_type in applicable_props:
+                    try:
+                        # Build features for the backup player
+                        features = await self.build_injury_adjusted_prop_features(
+                            game_id=f"{season}_{week}_{team}_{opponent_team}",
+                            player_id=activation.backup_player_id,
+                            player_name=activation.backup_player_name,
+                            prop_type=prop_type,
+                            season=season,
+                            week=week,
+                            opponent_team=opponent_team,
+                            player_team=team,
+                            position=position,
+                            pbp_df=pbp_df,
+                            odds_data=odds_data,
+                        )
+
+                        # Override with backup-specific values
+                        features.is_backup_starter = True
+                        features.replacing_player = activation.replacing_player_name
+                        features.usage_boosts_applied = activation.expected_usage_boost
+
+                        results.append(features)
+
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Failed to build backup features for {activation.backup_player_name}: {e}"
+                        )
+
+        except Exception as e:
+            self.logger.error(f"Failed to analyze injury impact for {team}: {e}")
+
+        return results
+
+    def _get_props_for_position(
+        self,
+        position: str,
+        available_props: list[str],
+    ) -> list[str]:
+        """Get prop types applicable to a position."""
+        position_props = {
+            "QB": ["passing_yards"],
+            "RB": ["rushing_yards", "receiving_yards", "receptions"],
+            "WR": ["receiving_yards", "receptions"],
+            "TE": ["receiving_yards", "receptions"],
+            "FB": ["rushing_yards", "receiving_yards"],
+        }
+
+        applicable = position_props.get(position.upper(), [])
+        return [p for p in applicable if p in available_props]
+
 
 async def create_feature_pipeline(
     data_pipeline=None,
+    espn_client=None,
     cache=None,
 ) -> FeaturePipeline:
     """
@@ -788,6 +1028,7 @@ async def create_feature_pipeline(
 
     Args:
         data_pipeline: Optional data pipeline for fetching data
+        espn_client: Optional ESPN client for injury/depth data
         cache: Optional cache manager
 
     Returns:
@@ -795,6 +1036,7 @@ async def create_feature_pipeline(
     """
     pipeline = FeaturePipeline(
         data_pipeline=data_pipeline,
+        espn_client=espn_client,
         cache=cache,
     )
     await pipeline.initialize()

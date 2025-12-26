@@ -26,6 +26,59 @@ class PropPredictionResponse(BaseModel):
     injury_status: Optional[str] = None  # ACTIVE, QUESTIONABLE, OUT, etc.
 
 
+class InjuryAdjustedPredictionResponse(BaseModel):
+    """Response model for injury-adjusted player prop prediction."""
+
+    player_name: str
+    team: str
+    opponent: str
+    game_id: str
+    prop_type: str
+    predicted_value: float
+    range_low: float  # 25th percentile (widened by uncertainty)
+    range_high: float  # 75th percentile (widened by uncertainty)
+    confidence: float
+    injury_status: str
+    # Injury context
+    uncertainty_multiplier: float = 1.0
+    is_backup_starter: bool = False
+    replacing_player: Optional[str] = None
+    usage_boost_applied: bool = False
+    usage_boost_reason: Optional[str] = None
+
+
+class BackupPlayerPrediction(BaseModel):
+    """Prediction for a backup player stepping into starter role."""
+
+    player_name: str
+    team: str
+    opponent: str
+    game_id: str
+    prop_type: str
+    predicted_value: float
+    range_low: float
+    range_high: float
+    confidence: float
+    injury_status: str
+    is_backup: bool = True
+    replacing_player: str
+    replacing_injury_status: str
+    uncertainty_note: str
+
+
+class EnhancedGamePredictionsResponse(BaseModel):
+    """Game predictions including backup players and injury context."""
+
+    game_id: str
+    home_team: str
+    away_team: str
+    kickoff: str
+    spread_prediction: Optional[float] = None
+    player_props: list[InjuryAdjustedPredictionResponse]
+    backup_player_props: list[BackupPlayerPrediction]
+    injury_summary: dict  # Summary of key injuries affecting predictions
+
+
 class GamePredictionsResponse(BaseModel):
     """Response model for predictions for a single game."""
 
@@ -498,3 +551,315 @@ async def get_game_predictions(
         return result["games"][0]
 
     return {"error": "Game not found", "game_id": game_id}
+
+
+@router.get("/predictions/enhanced")
+async def get_enhanced_predictions(
+    request: Request,
+    game_id: Optional[str] = Query(None, description="Filter to specific game"),
+    include_backups: bool = Query(True, description="Include backup player predictions"),
+) -> dict[str, Any]:
+    """
+    Get predictions with full injury context.
+
+    Features:
+    - Usage adjustments for teammates of injured players
+    - Backup player predictions when starters are Out/Doubtful
+    - Widened prediction ranges for uncertain situations
+    - Injury summary per game
+
+    Returns enhanced predictions with injury-adjusted values.
+    """
+    app_state = request.app.state.app_state
+
+    if not app_state.pipeline or not app_state.feature_pipeline:
+        return {
+            "count": 0,
+            "games": [],
+            "generated_at": datetime.now().isoformat(),
+            "error": "Pipeline not initialized",
+        }
+
+    # Get value detector with prop models
+    value_detector = app_state.value_detector
+    if not value_detector or not value_detector.prop_models:
+        return {
+            "count": 0,
+            "games": [],
+            "generated_at": datetime.now().isoformat(),
+            "error": "Prop models not loaded",
+        }
+
+    # Check if feature pipeline has depth analyzer
+    has_depth_analyzer = hasattr(app_state.feature_pipeline, 'depth_analyzer') and app_state.feature_pipeline.depth_analyzer is not None
+
+    # Get upcoming games
+    try:
+        games_df = await app_state.pipeline.get_upcoming_games()
+        if games_df is None or len(games_df) == 0:
+            return {
+                "count": 0,
+                "games": [],
+                "generated_at": datetime.now().isoformat(),
+            }
+        games = games_df.to_dicts()
+    except Exception as e:
+        logger.error(f"Failed to get upcoming games: {e}")
+        return {
+            "count": 0,
+            "games": [],
+            "generated_at": datetime.now().isoformat(),
+            "error": str(e),
+        }
+
+    # Filter to specific game if requested
+    if game_id:
+        games = [g for g in games if g.get("game_id") == game_id]
+
+    # Generate predictions for each game
+    game_predictions = []
+
+    for game in games:
+        gid = game.get("game_id", "")
+        home_team = game.get("home_team", "")
+        away_team = game.get("away_team", "")
+        season = game.get("season", 2024)
+        week = game.get("week", 1)
+        kickoff = game.get("commence_time") or game.get("gameday") or ""
+
+        if isinstance(kickoff, datetime):
+            kickoff = kickoff.isoformat()
+
+        player_preds = []
+        backup_preds = []
+        injury_summary = {"home_team": {}, "away_team": {}}
+
+        for team, opponent, team_key in [
+            (home_team, away_team, "home_team"),
+            (away_team, home_team, "away_team"),
+        ]:
+            # Get injury analysis for team if depth analyzer available
+            injured_starters = []
+            if has_depth_analyzer:
+                try:
+                    analysis = await app_state.feature_pipeline.depth_analyzer.analyze_injury_impact(
+                        team=team,
+                        season=season,
+                    )
+                    injured_starters = [
+                        {"name": ip.player_name, "position": ip.position, "status": ip.injury_status}
+                        for ip in analysis.injured_starters
+                    ]
+                    injury_summary[team_key] = {
+                        "injured_starters": injured_starters,
+                        "backup_activations": [
+                            {"backup": ba.backup_player_name, "replacing": ba.replacing_player_name, "position": ba.position}
+                            for ba in analysis.backup_activations
+                        ],
+                    }
+                except Exception as e:
+                    logger.debug(f"Failed to get injury analysis for {team}: {e}")
+
+            # Get team players
+            team_players = []
+            if app_state.pipeline:
+                try:
+                    team_players = await app_state.pipeline.get_key_players_dynamic(
+                        team=team,
+                        season=season,
+                        positions=["QB", "RB", "WR", "TE"],
+                        max_per_position=1,
+                        exclude_injured=False,
+                    )
+                except Exception as e:
+                    logger.debug(f"ESPN roster lookup failed for {team}: {e}")
+
+            if not team_players:
+                static_players = KEY_PLAYERS.get(team, [])
+                team_players = [
+                    {"name": p["name"], "position": p["position"], "injury_status": "UNKNOWN"}
+                    for p in static_players
+                ]
+
+            for player_info in team_players:
+                player_name = player_info.get("name", "")
+                position = player_info.get("position", "")
+                injury_status = player_info.get("injury_status", "ACTIVE")
+                prop_types = _get_prop_type_for_position(position)
+
+                player_id = await app_state.feature_pipeline.lookup_player_id(
+                    player_name=player_name,
+                    season=season,
+                    position=position,
+                )
+
+                if not player_id:
+                    continue
+
+                for prop_type in prop_types:
+                    prop_model = value_detector.prop_models.get(prop_type)
+                    if not prop_model:
+                        continue
+
+                    try:
+                        # Use injury-adjusted features if available
+                        if has_depth_analyzer:
+                            features = await app_state.feature_pipeline.build_injury_adjusted_prop_features(
+                                game_id=gid,
+                                player_id=player_id,
+                                player_name=player_name,
+                                prop_type=prop_type,
+                                season=season,
+                                week=week,
+                                opponent_team=opponent,
+                                player_team=team,
+                                position=position,
+                            )
+
+                            uncertainty_mult = features.uncertainty_multiplier
+                            is_backup_starter = features.is_backup_starter
+                            replacing_player = features.replacing_player
+                            usage_boosts = features.usage_boosts_applied
+                            feature_dict = features.features
+                        else:
+                            base_features = await app_state.feature_pipeline.build_prop_features(
+                                game_id=gid,
+                                player_id=player_id,
+                                player_name=player_name,
+                                prop_type=prop_type,
+                                season=season,
+                                week=week,
+                                opponent_team=opponent,
+                                position=position,
+                            )
+                            uncertainty_mult = 1.0
+                            is_backup_starter = False
+                            replacing_player = None
+                            usage_boosts = {}
+                            feature_dict = base_features.features
+
+                        # Make prediction with uncertainty adjustment
+                        prediction = prop_model.predict_player_with_uncertainty(
+                            features=feature_dict,
+                            player_id=player_id,
+                            player_name=player_name,
+                            game_id=gid,
+                            team=team,
+                            opponent=opponent,
+                            line=None,
+                            uncertainty_multiplier=uncertainty_mult,
+                        )
+
+                        # Calculate confidence
+                        confidence = max(0.5, min(0.95, 1.0 - (prediction.prediction_std / prediction.predicted_value) if prediction.predicted_value > 0 else 0.5))
+
+                        # Build usage boost reason
+                        usage_boost_reason = None
+                        if usage_boosts:
+                            boost_keys = list(usage_boosts.keys())
+                            if injured_starters:
+                                injured_names = [s["name"] for s in injured_starters]
+                                usage_boost_reason = f"Boost from injured: {', '.join(injured_names[:2])}"
+
+                        player_preds.append(
+                            InjuryAdjustedPredictionResponse(
+                                player_name=player_name,
+                                team=team,
+                                opponent=opponent,
+                                game_id=gid,
+                                prop_type=prop_type,
+                                predicted_value=round(prediction.predicted_value, 1),
+                                range_low=round(prediction.quantile_25, 1),
+                                range_high=round(prediction.quantile_75, 1),
+                                confidence=round(confidence, 2),
+                                injury_status=injury_status,
+                                uncertainty_multiplier=round(uncertainty_mult, 2),
+                                is_backup_starter=is_backup_starter,
+                                replacing_player=replacing_player,
+                                usage_boost_applied=bool(usage_boosts),
+                                usage_boost_reason=usage_boost_reason,
+                            )
+                        )
+
+                    except Exception as e:
+                        logger.debug(f"Failed enhanced prediction for {player_name}: {e}")
+                        continue
+
+            # Generate backup predictions if requested
+            if include_backups and has_depth_analyzer:
+                try:
+                    backup_features = await app_state.feature_pipeline.get_backup_player_features(
+                        team=team,
+                        season=season,
+                        week=week,
+                        opponent_team=opponent,
+                        prop_types=["passing_yards", "rushing_yards", "receiving_yards"],
+                    )
+
+                    for bf in backup_features:
+                        prop_model = value_detector.prop_models.get(bf.prop_type)
+                        if not prop_model:
+                            continue
+
+                        try:
+                            prediction = prop_model.predict_player_with_uncertainty(
+                                features=bf.features,
+                                player_id=bf.player_id,
+                                player_name=bf.player_name,
+                                game_id=gid,
+                                team=team,
+                                opponent=opponent,
+                                line=None,
+                                uncertainty_multiplier=bf.uncertainty_multiplier,
+                            )
+
+                            confidence = max(0.5, min(0.95, 1.0 - (prediction.prediction_std / prediction.predicted_value) if prediction.predicted_value > 0 else 0.5))
+
+                            backup_preds.append(
+                                BackupPlayerPrediction(
+                                    player_name=bf.player_name,
+                                    team=team,
+                                    opponent=opponent,
+                                    game_id=gid,
+                                    prop_type=bf.prop_type,
+                                    predicted_value=round(prediction.predicted_value, 1),
+                                    range_low=round(prediction.quantile_25, 1),
+                                    range_high=round(prediction.quantile_75, 1),
+                                    confidence=round(confidence, 2),
+                                    injury_status=bf.injury_status,
+                                    is_backup=True,
+                                    replacing_player=bf.replacing_player or "Unknown",
+                                    replacing_injury_status="OUT",
+                                    uncertainty_note=f"Elevated uncertainty (x{bf.uncertainty_multiplier:.1f}): backup stepping into starter role",
+                                )
+                            )
+
+                        except Exception as e:
+                            logger.debug(f"Failed backup prediction for {bf.player_name}: {e}")
+
+                except Exception as e:
+                    logger.debug(f"Failed to get backup features for {team}: {e}")
+
+        # Sort predictions
+        player_preds.sort(key=lambda p: (-p.predicted_value, p.prop_type))
+        backup_preds.sort(key=lambda p: (-p.predicted_value, p.prop_type))
+
+        game_predictions.append(
+            EnhancedGamePredictionsResponse(
+                game_id=gid,
+                home_team=home_team,
+                away_team=away_team,
+                kickoff=kickoff,
+                spread_prediction=None,
+                player_props=player_preds,
+                backup_player_props=backup_preds,
+                injury_summary=injury_summary,
+            )
+        )
+
+    return {
+        "count": len(game_predictions),
+        "games": game_predictions,
+        "generated_at": datetime.now().isoformat(),
+        "includes_injury_adjustments": has_depth_analyzer,
+    }
