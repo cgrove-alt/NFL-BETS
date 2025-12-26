@@ -222,3 +222,47 @@ export async function getGames(params?: {
 export async function getGameDetail(gameId: string): Promise<GameDetailResponse> {
   return fetchAPI<GameDetailResponse>(`/api/games/${encodeURIComponent(gameId)}`);
 }
+
+// Prop Predictions Types
+export interface PropPrediction {
+  player_name: string;
+  team: string;
+  opponent: string;
+  game_id: string;
+  prop_type: string;
+  predicted_value: number;
+  range_low: number;
+  range_high: number;
+  confidence: number;
+  injury_status?: string;
+}
+
+export interface GamePredictions {
+  game_id: string;
+  home_team: string;
+  away_team: string;
+  kickoff: string;
+  spread_prediction: number | null;
+  player_props: PropPrediction[];
+}
+
+export interface PredictionsResponse {
+  count: number;
+  games: GamePredictions[];
+  generated_at: string;
+  error?: string;
+}
+
+export async function getPredictions(gameId?: string): Promise<PredictionsResponse> {
+  const query = gameId ? `?game_id=${encodeURIComponent(gameId)}` : '';
+  return fetchAPI<PredictionsResponse>(`/api/predictions${query}`);
+}
+
+export async function getGamePredictions(gameId: string): Promise<GamePredictions | null> {
+  try {
+    const response = await fetchAPI<GamePredictions>(`/api/predictions/${encodeURIComponent(gameId)}`);
+    return response;
+  } catch {
+    return null;
+  }
+}

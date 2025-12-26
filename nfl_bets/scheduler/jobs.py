@@ -614,70 +614,139 @@ async def poll_props(
     """
     from nfl_bets.betting.kelly_calculator import KellyCalculator
 
-    logger.info("Starting props poll...")
+    logger.info("=== STARTING PROPS POLL ===")
     start_time = datetime.now()
 
     try:
-        # 1. Get upcoming games
+        # 1. Get upcoming games from nflverse
         games_df = await pipeline.get_upcoming_games()
         if games_df is None or len(games_df) == 0:
-            logger.debug("No upcoming games for props poll")
+            logger.warning("PROPS POLL: No upcoming games found")
             return []
 
         games = games_df.to_dicts()
-        logger.info(f"Found {len(games)} upcoming games for props")
+        logger.info(f"Step 1: Found {len(games)} upcoming games for props")
 
-        # 2. Fetch player props for each game
+        # 2. Get Odds API events to map game_id -> event_id
+        # The Odds API uses its own event IDs (UUIDs), not nflverse game_ids
+        try:
+            odds_events = await pipeline.odds_api.get_events()
+            logger.info(f"Step 2: Got {len(odds_events)} events from Odds API")
+        except Exception as e:
+            logger.error(f"PROPS POLL: Failed to get Odds API events: {e}")
+            return []
+
+        # Build mapping: (home_team, away_team) -> event_id
+        event_map = {}
+        for event in odds_events:
+            home = TEAM_NAME_MAP.get(event.get("home_team", ""), event.get("home_team", "").upper())
+            away = TEAM_NAME_MAP.get(event.get("away_team", ""), event.get("away_team", "").upper())
+            event_map[(home, away)] = event.get("id")
+
+        # 3. Fetch player props for each game using Odds API event_id
         all_props = []
         for game in games:
             game_id = game.get("game_id")
-            if not game_id:
+            home_team = game.get("home_team", "").upper()
+            away_team = game.get("away_team", "").upper()
+
+            # Look up the Odds API event_id
+            event_id = event_map.get((home_team, away_team))
+            if not event_id:
+                logger.debug(f"No Odds API event found for {away_team} @ {home_team}")
                 continue
+
             try:
-                props_data = await pipeline.get_player_props(game_id)
-                if props_data:
+                # Use event_id (not game_id) to fetch props from Odds API
+                # Filter to DraftKings only to save API credits
+                props_data = await pipeline.odds_api.get_player_props(
+                    event_id=event_id,
+                    bookmakers=["draftkings"],
+                )
+                if props_data and props_data.get("bookmakers"):
                     parsed = parse_props(props_data, game)
                     all_props.extend(parsed)
+                    logger.debug(f"Got {len(parsed)} props for {away_team} @ {home_team}")
             except Exception as e:
-                logger.debug(f"No props for {game_id}: {e}")
+                logger.debug(f"No props for {game_id} (event {event_id}): {e}")
 
         if not all_props:
-            logger.info("No player props available")
+            logger.info("PROPS POLL: No player props available from DraftKings")
             return []
 
-        logger.info(f"Found {len(all_props)} player props across all games")
+        logger.info(f"Step 3: Found {len(all_props)} player props from DraftKings")
 
-        # 3. Build features for each unique player
+        # 4. Determine PBP season (map 2025 -> 2024 for current season)
+        sample_season = games[0].get("season") if games else None
+        pbp_season = int(sample_season) if sample_season else 2024
+        if pbp_season == 2025:
+            pbp_season = 2024  # Use current NFL season's played data
+        logger.info(f"Step 4: Using PBP season {pbp_season} for features")
+
+        # Pre-fetch PBP data once for all players
+        pbp_df = await pipeline.get_historical_pbp([pbp_season])
+        if pbp_df is None or len(pbp_df) == 0:
+            logger.warning(f"PROPS POLL: No PBP data for season {pbp_season}")
+            return []
+
+        # 5. Build features for each unique player
+        # First, resolve player names to nflverse player_ids
         player_features = {}
+        player_id_cache = {}  # Cache player_name -> player_id lookups
+
         for prop in all_props:
-            player_id = prop.get("player_id")
+            player_name = prop.get("player_name")
+            if not player_name:
+                continue
+
+            # Use cache or look up player_id
+            if player_name in player_id_cache:
+                player_id = player_id_cache[player_name]
+            else:
+                # Look up real nflverse player_id from name
+                position = _get_position_for_prop_type(prop.get("prop_type"))
+                player_id = await feature_pipeline.lookup_player_id(
+                    player_name=player_name,
+                    season=pbp_season,
+                    position=position,
+                )
+                player_id_cache[player_name] = player_id
+
+            if not player_id:
+                logger.debug(f"Could not find player_id for {player_name}")
+                continue
+
+            # Update the prop with the real player_id
+            prop["player_id"] = player_id
+
+            # Skip if we already have features for this player
             if player_id in player_features:
                 continue
 
-            season = prop.get("season")
             week = prop.get("week")
-            if not season or not week:
+            if not week:
                 continue
 
             try:
                 pf = await feature_pipeline.build_prop_features(
                     game_id=prop["game_id"],
                     player_id=player_id,
-                    player_name=prop["player_name"],
+                    player_name=player_name,
                     prop_type=prop["prop_type"],
-                    season=int(season),
+                    season=pbp_season,  # Use mapped season
                     week=int(week),
                     opponent_team=prop["opponent"],
+                    pbp_df=pbp_df,  # Pass pre-fetched PBP data
                 )
                 player_features[player_id] = pf.features
             except Exception as e:
-                logger.debug(f"Could not build prop features for {player_id}: {e}")
+                logger.debug(f"Could not build prop features for {player_name}: {e}")
 
-        logger.info(f"Built features for {len(player_features)} players")
+        logger.info(f"Step 5: Built features for {len(player_features)} players")
 
-        # 4. Run prop value detection
+        # 6. Run prop value detection
         if not player_features:
-            logger.warning("No player features built, skipping prop detection")
+            logger.warning("PROPS POLL: No player features built, skipping detection")
             return []
 
         result = value_detector.scan_props(
@@ -686,8 +755,9 @@ async def poll_props(
         )
 
         value_bets = result.value_bets
+        logger.info(f"Step 6: Value detection found {len(value_bets)} prop value bets")
 
-        # 5. Calculate recommended stakes
+        # 7. Calculate recommended stakes
         kelly = KellyCalculator()
         for bet in value_bets:
             stake = kelly.calculate_stake(
@@ -698,10 +768,23 @@ async def poll_props(
             bet.recommended_stake = stake.recommended_stake
 
         elapsed = (datetime.now() - start_time).total_seconds()
-        logger.info(f"Props poll complete in {elapsed:.1f}s, found {len(value_bets)} prop bets")
+        logger.info(f"=== PROPS POLL COMPLETE in {elapsed:.1f}s === Found {len(value_bets)} prop bets")
 
         return value_bets
 
     except Exception as e:
-        logger.error(f"Props polling failed: {e}")
+        import traceback
+        logger.error(f"PROPS POLL FAILED: {e}")
+        logger.error(traceback.format_exc())
         return []
+
+
+def _get_position_for_prop_type(prop_type: str) -> str:
+    """Get the position hint for player ID lookup based on prop type."""
+    position_map = {
+        "passing_yards": "QB",
+        "rushing_yards": "RB",
+        "receiving_yards": "WR",
+        "receptions": "WR",
+    }
+    return position_map.get(prop_type, None)

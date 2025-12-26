@@ -172,16 +172,16 @@ class SchedulerOrchestrator:
             replace_existing=True,
         )
 
-        # Manual prop polling job (triggered by user refresh button)
-        # This job is paused by default - only runs when manually triggered
+        # Player props polling job - runs every 2 hours during active hours
+        # Props cost 5 credits per game, so we poll less frequently than spreads
         self.scheduler.add_job(
             self._poll_props_job,
-            trigger=IntervalTrigger(hours=24),  # Effectively disabled
+            trigger=IntervalTrigger(hours=2),
             id="poll_props",
-            name="Poll Player Props (Manual)",
+            name="Poll Player Props",
             replace_existing=True,
         )
-        self.scheduler.pause_job("poll_props")
+        # Note: poll_props is now enabled by default
 
         # Initialize job status
         for job in self.scheduler.get_jobs():
@@ -234,14 +234,22 @@ class SchedulerOrchestrator:
 
     async def _poll_props_job(self) -> None:
         """
-        Poll player props (triggered manually or by scheduled events).
+        Poll player props for value betting opportunities.
 
         Called at:
+        - Every 2 hours during active hours (automatic)
         - 8am game day morning (via _morning_props_job)
         - 30 min before each game (via scheduled one-time jobs)
         - When user clicks refresh button (via trigger_job)
         """
         from nfl_bets.scheduler.jobs import poll_props
+
+        # Check if in active hours (same as odds poll)
+        now = datetime.now()
+        sched = self.settings.scheduler
+        if not (sched.active_hours_start <= now.hour < sched.active_hours_end):
+            logger.debug(f"Props poll: Outside active hours ({sched.active_hours_start}-{sched.active_hours_end})")
+            return
 
         logger.info("Running prop poll...")
 
@@ -253,7 +261,13 @@ class SchedulerOrchestrator:
             bankroll_manager=self.bankroll_manager,
         )
 
-        # Merge with existing value bets (don't overwrite spread bets)
+        # Remove old prop bets from value bets list, keep spread bets
+        self._last_value_bets = [
+            bet for bet in self._last_value_bets
+            if bet.bet_type == "spread" or bet.bet_type.value == "spread"
+        ]
+
+        # Add new prop bets
         if prop_bets:
             self._last_value_bets.extend(prop_bets)
             logger.info(f"Found {len(prop_bets)} prop value bet(s)")
