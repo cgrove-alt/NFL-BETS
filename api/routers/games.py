@@ -3,7 +3,7 @@
 import logging
 from collections import defaultdict
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel
@@ -13,6 +13,35 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+# =============================================================================
+# UNIVERSAL DATA ACCESSOR
+# =============================================================================
+def get_val(obj: Any, key: str, default: Any = None) -> Any:
+    """
+    Safely retrieves a value from either a Class Object or a Dictionary.
+
+    This is CRITICAL for handling the data type mismatch between:
+    - Live Data from pipeline (Python Objects accessed via getattr)
+    - Fallback Data (Dictionaries accessed via ['key'])
+
+    Args:
+        obj: Either a dictionary or an object with attributes
+        key: The key/attribute name to retrieve
+        default: Default value if key not found
+
+    Returns:
+        The value associated with key, or default if not found
+    """
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+# =============================================================================
+# PYDANTIC MODELS
+# =============================================================================
 class GameResponse(BaseModel):
     """Response model for a game with value bet summary."""
 
@@ -43,26 +72,31 @@ class GamesListResponse(BaseModel):
     is_fallback: bool = False
 
 
-def _format_bet(bet, game_id_override: str = None) -> dict:
+# =============================================================================
+# HELPER FUNCTIONS
+# =============================================================================
+def _format_bet(bet: Any, game_id_override: str = None) -> dict:
     """
     Format a bet object into a dictionary matching the ValueBet frontend interface.
 
+    Uses get_val() to handle both Object and Dictionary data types.
+
     Args:
-        bet: The bet object (can be ValueBet, FallbackValueBet, or similar)
+        bet: The bet object (can be ValueBet, FallbackValueBet, dict, or similar)
         game_id_override: Optional game_id to use instead of bet's game_id
 
     Returns:
         Dictionary with all ValueBet fields
     """
     # Get urgency value - handle enum or string
-    urgency_val = getattr(bet, "urgency", "medium")
+    urgency_val = get_val(bet, "urgency", "medium")
     if hasattr(urgency_val, "value"):
         urgency_str = urgency_val.value
     else:
         urgency_str = str(urgency_val)
 
     # Get detected_at - handle datetime or None
-    detected_at = getattr(bet, "detected_at", None)
+    detected_at = get_val(bet, "detected_at", None)
     if detected_at is not None:
         if isinstance(detected_at, datetime):
             detected_at_str = detected_at.isoformat()
@@ -72,7 +106,7 @@ def _format_bet(bet, game_id_override: str = None) -> dict:
         detected_at_str = datetime.now().isoformat()
 
     # Get expires_at - handle datetime or None
-    expires_at = getattr(bet, "expires_at", None)
+    expires_at = get_val(bet, "expires_at", None)
     if expires_at is not None:
         if isinstance(expires_at, datetime):
             expires_at_str = expires_at.isoformat()
@@ -81,23 +115,56 @@ def _format_bet(bet, game_id_override: str = None) -> dict:
     else:
         expires_at_str = None
 
+    # Extract game_id using universal accessor
+    bet_game_id = get_val(bet, "game_id", "")
+
     return {
-        "game_id": game_id_override or getattr(bet, "game_id", ""),
-        "bet_type": getattr(bet, "bet_type", ""),
-        "description": getattr(bet, "description", ""),
-        "model_probability": getattr(bet, "model_probability", 0),
-        "model_prediction": getattr(bet, "model_prediction", 0),
-        "bookmaker": getattr(bet, "bookmaker", ""),
-        "odds": getattr(bet, "odds", 0),
-        "implied_probability": getattr(bet, "implied_probability", 0),
-        "line": getattr(bet, "line", 0),
-        "edge": getattr(bet, "edge", 0),
-        "expected_value": getattr(bet, "expected_value", 0),
-        "recommended_stake": getattr(bet, "recommended_stake", None),
+        "game_id": game_id_override or bet_game_id,
+        "bet_type": get_val(bet, "bet_type", ""),
+        "description": get_val(bet, "description", ""),
+        "model_probability": get_val(bet, "model_probability", 0),
+        "model_prediction": get_val(bet, "model_prediction", 0),
+        "bookmaker": get_val(bet, "bookmaker", ""),
+        "odds": get_val(bet, "odds", 0),
+        "implied_probability": get_val(bet, "implied_probability", 0),
+        "line": get_val(bet, "line", 0),
+        "edge": get_val(bet, "edge", 0),
+        "expected_value": get_val(bet, "expected_value", 0),
+        "recommended_stake": get_val(bet, "recommended_stake", None),
         "urgency": urgency_str,
         "detected_at": detected_at_str,
         "expires_at": expires_at_str,
     }
+
+
+def _get_bet_game_id(bet: Any) -> str:
+    """
+    Extract game_id from a bet using universal accessor.
+
+    Args:
+        bet: The bet object (can be Object or Dictionary)
+
+    Returns:
+        The game_id as a string
+    """
+    return str(get_val(bet, "game_id", ""))
+
+
+def _get_bet_edge(bet: Any) -> float:
+    """
+    Extract edge from a bet using universal accessor.
+
+    Args:
+        bet: The bet object (can be Object or Dictionary)
+
+    Returns:
+        The edge as a float
+    """
+    edge = get_val(bet, "edge", 0)
+    try:
+        return float(edge)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _build_demo_games(app_state) -> list[GameResponse]:
@@ -116,32 +183,33 @@ def _build_demo_games(app_state) -> list[GameResponse]:
     value_bets = app_state.last_value_bets
     bets_by_game = defaultdict(list)
     for bet in value_bets:
-        game_id = getattr(bet, "game_id", "")
-        bets_by_game[game_id].append(bet)
+        game_id = _get_bet_game_id(bet)
+        if game_id:
+            bets_by_game[game_id].append(bet)
 
     for game in app_state._mock_games:
-        game_id = game.get("game_id", "")
+        game_id = get_val(game, "game_id", "")
         game_bets = bets_by_game.get(game_id, [])
 
-        # Find best edge bet
+        # Find best edge bet using universal accessor
         best_bet = None
         if game_bets:
-            best_bet = max(game_bets, key=lambda b: getattr(b, "edge", 0))
+            best_bet = max(game_bets, key=_get_bet_edge)
 
         response_games.append(
             GameResponse(
                 game_id=game_id,
-                home_team=game.get("home_team", ""),
-                away_team=game.get("away_team", ""),
-                kickoff=game.get("kickoff", ""),
-                week=game.get("week", 1),
-                season=game.get("season", 2024),
+                home_team=get_val(game, "home_team", ""),
+                away_team=get_val(game, "away_team", ""),
+                kickoff=get_val(game, "kickoff", ""),
+                week=get_val(game, "week", 1),
+                season=get_val(game, "season", 2024),
                 value_bet_count=len(game_bets),
-                best_edge=getattr(best_bet, "edge", None) if best_bet else None,
-                best_bet_description=getattr(best_bet, "description", None) if best_bet else None,
-                model_prediction=getattr(best_bet, "model_prediction", None) if best_bet else None,
-                model_confidence=getattr(best_bet, "model_probability", None) if best_bet else None,
-                vegas_line=game.get("spread"),
+                best_edge=get_val(best_bet, "edge", None) if best_bet else None,
+                best_bet_description=get_val(best_bet, "description", None) if best_bet else None,
+                model_prediction=get_val(best_bet, "model_prediction", None) if best_bet else None,
+                model_confidence=get_val(best_bet, "model_probability", None) if best_bet else None,
+                vegas_line=get_val(game, "spread", None),
             )
         )
 
@@ -174,35 +242,36 @@ def _build_fallback_games(app_state) -> list[GameResponse]:
     fallback_games = app_state.get_fallback_games()
     fallback_bets = app_state.get_fallback_data()
 
-    # Group bets by game
+    # Group bets by game using universal accessor
     bets_by_game = defaultdict(list)
     for bet in fallback_bets:
-        game_id = getattr(bet, "game_id", "")
-        bets_by_game[game_id].append(bet)
+        game_id = _get_bet_game_id(bet)
+        if game_id:
+            bets_by_game[game_id].append(bet)
 
     for game in fallback_games:
-        game_id = game.get("game_id", "")
+        game_id = get_val(game, "game_id", "")
         game_bets = bets_by_game.get(game_id, [])
 
-        # Find best edge bet
+        # Find best edge bet using universal accessor
         best_bet = None
         if game_bets:
-            best_bet = max(game_bets, key=lambda b: getattr(b, "edge", 0))
+            best_bet = max(game_bets, key=_get_bet_edge)
 
         response_games.append(
             GameResponse(
                 game_id=game_id,
-                home_team=game.get("home_team", ""),
-                away_team=game.get("away_team", ""),
-                kickoff=game.get("kickoff", ""),
-                week=game.get("week", 17),
-                season=game.get("season", 2024),
+                home_team=get_val(game, "home_team", ""),
+                away_team=get_val(game, "away_team", ""),
+                kickoff=get_val(game, "kickoff", ""),
+                week=get_val(game, "week", 17),
+                season=get_val(game, "season", 2024),
                 value_bet_count=len(game_bets),
-                best_edge=getattr(best_bet, "edge", None) if best_bet else None,
-                best_bet_description=getattr(best_bet, "description", None) if best_bet else None,
-                model_prediction=getattr(best_bet, "model_prediction", None) if best_bet else None,
-                model_confidence=getattr(best_bet, "model_probability", None) if best_bet else None,
-                vegas_line=game.get("spread"),
+                best_edge=get_val(best_bet, "edge", None) if best_bet else None,
+                best_bet_description=get_val(best_bet, "description", None) if best_bet else None,
+                model_prediction=get_val(best_bet, "model_prediction", None) if best_bet else None,
+                model_confidence=get_val(best_bet, "model_probability", None) if best_bet else None,
+                vegas_line=get_val(game, "spread", None),
             )
         )
 
@@ -212,6 +281,9 @@ def _build_fallback_games(app_state) -> list[GameResponse]:
     return response_games
 
 
+# =============================================================================
+# API ENDPOINTS
+# =============================================================================
 @router.get("/games", response_model=GamesListResponse)
 async def get_games(
     request: Request,
@@ -233,8 +305,8 @@ async def get_games(
     app_state = request.app.state.app_state
 
     # Get status flags
-    is_demo = getattr(app_state, "_demo_mode", False)
-    is_initializing = getattr(app_state, "_is_initializing", True)
+    is_demo = get_val(app_state, "_demo_mode", False)
+    is_initializing = get_val(app_state, "_is_initializing", True)
 
     # DEMO MODE: Return mock games immediately
     if is_demo and app_state._mock_games:
@@ -256,7 +328,7 @@ async def get_games(
     # COLD START: If still initializing and no data, tell frontend to retry
     if is_initializing and not app_state.last_value_bets:
         # Check if we have cached data to show
-        cached_bets = getattr(app_state, "_cached_bets_raw", None)
+        cached_bets = get_val(app_state, "_cached_bets_raw", None)
         if not cached_bets:
             logger.info("⏳ System initializing - advising frontend to retry in 5s")
             return {
@@ -280,35 +352,38 @@ async def get_games(
         except Exception as e:
             logger.warning(f"Failed to get enriched games: {e}")
 
-    # Get value bets and group by game
+    # Get value bets and group by game using universal accessor
     value_bets = app_state.last_value_bets
     bets_by_game = defaultdict(list)
     for bet in value_bets:
-        bets_by_game[bet.game_id].append(bet)
+        game_id = _get_bet_game_id(bet)
+        if game_id:
+            bets_by_game[game_id].append(bet)
 
     # Build response
     response_games = []
 
     for game in games_data:
-        game_id = game.game_id
+        game_id = get_val(game, "game_id", "")
         game_bets = bets_by_game.get(game_id, [])
 
-        # Find best edge bet
+        # Find best edge bet using universal accessor
         best_bet = None
         if game_bets:
-            best_bet = max(game_bets, key=lambda b: b.edge)
+            best_bet = max(game_bets, key=_get_bet_edge)
 
         # Extract Vegas line from odds if available
         vegas_line = None
-        if game.odds and isinstance(game.odds, dict):
-            bookmakers = game.odds.get("bookmakers", [])
+        odds = get_val(game, "odds", None)
+        if odds and isinstance(odds, dict):
+            bookmakers = odds.get("bookmakers", [])
             for book in bookmakers:
                 markets = book.get("markets", [])
                 for market in markets:
                     if market.get("key") == "spreads":
                         outcomes = market.get("outcomes", [])
                         for outcome in outcomes:
-                            if outcome.get("name") == game.home_team:
+                            if outcome.get("name") == get_val(game, "home_team", ""):
                                 vegas_line = outcome.get("point")
                                 break
                 if vegas_line is not None:
@@ -318,27 +393,29 @@ async def get_games(
         model_prediction = None
         model_confidence = None
         if best_bet:
-            model_prediction = best_bet.model_prediction
-            model_confidence = best_bet.model_probability
+            model_prediction = get_val(best_bet, "model_prediction", None)
+            model_confidence = get_val(best_bet, "model_probability", None)
 
         # Filter by week if specified
-        if week is not None and game.week != week:
+        game_week = get_val(game, "week", None)
+        if week is not None and game_week != week:
             continue
 
         # Format kickoff time
-        kickoff_str = game.kickoff.isoformat() if isinstance(game.kickoff, datetime) else str(game.kickoff)
+        kickoff = get_val(game, "kickoff", None)
+        kickoff_str = kickoff.isoformat() if isinstance(kickoff, datetime) else str(kickoff or "")
 
         response_games.append(
             GameResponse(
                 game_id=game_id,
-                home_team=game.home_team,
-                away_team=game.away_team,
+                home_team=get_val(game, "home_team", ""),
+                away_team=get_val(game, "away_team", ""),
                 kickoff=kickoff_str,
-                week=game.week,
-                season=game.season,
+                week=get_val(game, "week", 17),
+                season=get_val(game, "season", 2024),
                 value_bet_count=len(game_bets),
-                best_edge=best_bet.edge if best_bet else None,
-                best_bet_description=best_bet.description if best_bet else None,
+                best_edge=get_val(best_bet, "edge", None) if best_bet else None,
+                best_bet_description=get_val(best_bet, "description", None) if best_bet else None,
                 model_prediction=model_prediction,
                 model_confidence=model_confidence,
                 vegas_line=vegas_line,
@@ -383,16 +460,16 @@ async def get_game_detail(
     app_state = request.app.state.app_state
 
     # Check demo mode first
-    is_demo = getattr(app_state, "_demo_mode", False)
+    is_demo = get_val(app_state, "_demo_mode", False)
 
     if is_demo and app_state._mock_games:
         # Find game in mock data
         for game in app_state._mock_games:
-            if game.get("game_id") == game_id:
-                # Get bets for this game
+            if get_val(game, "game_id", "") == game_id:
+                # Get bets for this game using universal accessor
                 game_bets = [
                     bet for bet in app_state.last_value_bets
-                    if getattr(bet, "game_id", "") == game_id
+                    if _get_bet_game_id(bet) == game_id
                 ]
 
                 # Format bets with game_id included
@@ -401,11 +478,11 @@ async def get_game_detail(
 
                 return {
                     "game_id": game_id,
-                    "home_team": game.get("home_team", ""),
-                    "away_team": game.get("away_team", ""),
-                    "kickoff": game.get("kickoff", ""),
-                    "week": game.get("week", 1),
-                    "season": game.get("season", 2024),
+                    "home_team": get_val(game, "home_team", ""),
+                    "away_team": get_val(game, "away_team", ""),
+                    "kickoff": get_val(game, "kickoff", ""),
+                    "week": get_val(game, "week", 1),
+                    "season": get_val(game, "season", 2024),
                     "value_bets": formatted_bets,
                     "value_bet_count": len(formatted_bets),
                     "is_demo": True,
@@ -418,12 +495,12 @@ async def get_game_detail(
     # ROBUST FALLBACK: Check if we're in fallback mode BEFORE querying pipeline
     # This prevents 404 errors when the system is not fully initialized
     # =========================================================================
-    is_initialized = getattr(app_state, "_initialized", False)
-    using_fallback = getattr(app_state, "_using_fallback", False)
+    is_initialized = get_val(app_state, "_initialized", False)
+    using_fallback = get_val(app_state, "_using_fallback", False)
 
     # Force fallback mode check by accessing last_value_bets (triggers _using_fallback flag)
     _ = app_state.last_value_bets
-    using_fallback = getattr(app_state, "_using_fallback", False)
+    using_fallback = get_val(app_state, "_using_fallback", False)
 
     if not is_initialized or using_fallback:
         logger.info(f"🔄 FALLBACK MODE: Serving game {game_id} from fallback data (initialized={is_initialized}, using_fallback={using_fallback})")
@@ -432,16 +509,19 @@ async def get_game_detail(
         fallback_games = app_state.get_fallback_games()
         fallback_bets = app_state.get_fallback_data()
 
-        # Find the specific game
+        # Find the specific game using universal accessor
         target_game = None
         for fg in fallback_games:
-            if fg.get("game_id") == game_id:
+            if get_val(fg, "game_id", "") == game_id:
                 target_game = fg
                 break
 
         if target_game:
-            # Filter bets for this game
-            game_bets = [bet for bet in fallback_bets if getattr(bet, "game_id", "") == game_id]
+            # Filter bets for this game using universal accessor
+            game_bets = [
+                bet for bet in fallback_bets
+                if _get_bet_game_id(bet) == game_id
+            ]
 
             # Format bets with game_id included
             formatted_bets = [_format_bet(bet, game_id) for bet in game_bets]
@@ -449,11 +529,11 @@ async def get_game_detail(
 
             return {
                 "game_id": game_id,
-                "home_team": target_game.get("home_team", ""),
-                "away_team": target_game.get("away_team", ""),
-                "kickoff": target_game.get("kickoff", ""),
-                "week": target_game.get("week", 17),
-                "season": target_game.get("season", 2024),
+                "home_team": get_val(target_game, "home_team", ""),
+                "away_team": get_val(target_game, "away_team", ""),
+                "kickoff": get_val(target_game, "kickoff", ""),
+                "week": get_val(target_game, "week", 17),
+                "season": get_val(target_game, "season", 2024),
                 "value_bets": formatted_bets,
                 "value_bet_count": len(formatted_bets),
                 "is_demo": False,
@@ -475,15 +555,18 @@ async def get_game_detail(
                 include_health=False,
             )
             for game in enriched_games:
-                if game.game_id == game_id:
+                if get_val(game, "game_id", "") == game_id:
                     game_data = game
                     break
         except Exception as e:
             logger.warning(f"Pipeline query failed for game {game_id}: {e}")
 
-    # Get value bets for this game
+    # Get value bets for this game using universal accessor
     value_bets = app_state.last_value_bets
-    game_bets = [bet for bet in value_bets if getattr(bet, "game_id", "") == game_id]
+    game_bets = [
+        bet for bet in value_bets
+        if _get_bet_game_id(bet) == game_id
+    ]
 
     # =========================================================================
     # FALLBACK RECOVERY: If pipeline failed, reconstruct game from bets or fallback data
@@ -495,16 +578,16 @@ async def get_game_detail(
         # First, try to find game in fallback games
         fallback_games = app_state.get_fallback_games()
         for fg in fallback_games:
-            if fg.get("game_id") == game_id:
+            if get_val(fg, "game_id", "") == game_id:
                 logger.info(f"✅ Found game {game_id} in fallback games")
                 # Create synthetic game object from fallback data
                 game_data = type("SyntheticGame", (), {
                     "game_id": game_id,
-                    "home_team": fg.get("home_team", "Unknown"),
-                    "away_team": fg.get("away_team", "Unknown"),
-                    "kickoff": fg.get("kickoff", datetime.now().isoformat()),
-                    "week": fg.get("week", 17),
-                    "season": fg.get("season", 2024),
+                    "home_team": get_val(fg, "home_team", "Unknown"),
+                    "away_team": get_val(fg, "away_team", "Unknown"),
+                    "kickoff": get_val(fg, "kickoff", datetime.now().isoformat()),
+                    "week": get_val(fg, "week", 17),
+                    "season": get_val(fg, "season", 2024),
                 })()
                 is_fallback = True
                 break
@@ -527,9 +610,9 @@ async def get_game_detail(
                 home_team = "Unknown"
                 away_team = "Unknown"
 
-            # Try to extract kickoff from bet if available
+            # Try to extract kickoff from bet if available using universal accessor
             sample_bet = game_bets[0]
-            kickoff = getattr(sample_bet, "detected_at", datetime.now())
+            kickoff = get_val(sample_bet, "detected_at", datetime.now())
             if isinstance(kickoff, datetime):
                 kickoff = kickoff.isoformat()
 
@@ -556,17 +639,17 @@ async def get_game_detail(
     formatted_bets = [_format_bet(bet, game_id) for bet in game_bets]
     formatted_bets.sort(key=lambda b: b["edge"], reverse=True)
 
-    # Format kickoff
-    kickoff_val = getattr(game_data, "kickoff", datetime.now())
+    # Format kickoff using universal accessor
+    kickoff_val = get_val(game_data, "kickoff", datetime.now())
     kickoff_str = kickoff_val.isoformat() if isinstance(kickoff_val, datetime) else str(kickoff_val)
 
     return {
         "game_id": game_id,
-        "home_team": getattr(game_data, "home_team", "Unknown"),
-        "away_team": getattr(game_data, "away_team", "Unknown"),
+        "home_team": get_val(game_data, "home_team", "Unknown"),
+        "away_team": get_val(game_data, "away_team", "Unknown"),
         "kickoff": kickoff_str,
-        "week": getattr(game_data, "week", 17),
-        "season": getattr(game_data, "season", 2024),
+        "week": get_val(game_data, "week", 17),
+        "season": get_val(game_data, "season", 2024),
         "value_bets": formatted_bets,
         "value_bet_count": len(formatted_bets),
         "is_demo": False,
