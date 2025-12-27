@@ -7,10 +7,14 @@ Holds shared state across the application:
 - Value detector
 - Bankroll manager
 - Scheduler orchestrator
+
+CRITICAL: Implements "Instant Start" pattern - data loads immediately on boot,
+not waiting for scheduler to trigger.
 """
 
 import asyncio
 import logging
+from datetime import datetime
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -34,6 +38,8 @@ class AppState:
         self._initialized = False
         self._last_value_bets: list = []
         self._init_error: str = None  # Track initialization error
+        self._last_data_refresh: datetime = None  # Track when data was last refreshed
+        self._startup_refresh_complete: bool = False  # Track if instant start completed
 
     async def initialize(self) -> None:
         """Initialize all application components."""
@@ -122,6 +128,11 @@ class AppState:
             self._initialized = True
             logger.info("All components initialized successfully")
 
+            # INSTANT START: Trigger immediate data refresh
+            # Don't wait for scheduler - users need data NOW
+            logger.info("🚀 Startup Data Refresh Initiated")
+            asyncio.create_task(self._perform_startup_refresh())
+
         except Exception as e:
             import traceback
             self._init_error = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
@@ -150,8 +161,32 @@ class AppState:
             return self.scheduler.get_last_value_bets()
         return self._last_value_bets
 
+    async def _perform_startup_refresh(self) -> None:
+        """
+        Perform immediate data refresh on startup.
+
+        This is the "Instant Start" feature - loads live odds and detects
+        value bets immediately, so users see data on first page load.
+        """
+        try:
+            if self.scheduler:
+                logger.info("🔄 Running startup value bet poll...")
+                # Use the scheduler's poll method which handles everything
+                await self.scheduler._poll_value_bets()
+                self._last_data_refresh = datetime.now()
+                self._startup_refresh_complete = True
+                logger.info(f"✅ Startup Data Refresh Complete - {len(self.last_value_bets)} bets found")
+            else:
+                logger.warning("⚠️ Scheduler not available for startup refresh")
+        except Exception as e:
+            logger.error(f"❌ Startup Data Refresh Failed: {e}")
+            # Don't raise - this is a background task
+
     def get_health_status(self) -> dict:
         """Get health status of all components."""
+        # Count value bets in memory
+        bets_count = len(self.last_value_bets)
+
         status = {
             "initialized": self._initialized,
             "settings": self.settings is not None,
@@ -162,6 +197,9 @@ class AppState:
             "bankroll_manager": self.bankroll_manager is not None,
             "scheduler": self.scheduler is not None,
             "scheduler_running": self.scheduler.is_running if self.scheduler else False,
+            "bets_in_memory": bets_count,
+            "last_data_refresh": self._last_data_refresh.isoformat() if self._last_data_refresh else None,
+            "startup_refresh_complete": self._startup_refresh_complete,
         }
         if self._init_error:
             status["init_error"] = self._init_error

@@ -97,6 +97,16 @@ export interface HealthStatus {
   components: Record<string, boolean>;
 }
 
+export interface DetailedHealthStatus {
+  status: 'online' | 'degraded' | 'offline';
+  bets_in_memory: number;
+  last_update: string | null;
+  scheduler_running: boolean;
+  models_loaded: boolean;
+  startup_complete: boolean;
+  timestamp: string;
+}
+
 export interface PerformanceMetrics {
   total_bets: number;
   wins: number;
@@ -145,6 +155,10 @@ export interface GameDetailResponse {
 
 export async function getHealth(): Promise<HealthStatus> {
   return fetchAPI<HealthStatus>('/api/health');
+}
+
+export async function getDetailedHealth(): Promise<DetailedHealthStatus> {
+  return fetchAPI<DetailedHealthStatus>('/api/health/status');
 }
 
 export async function getValueBets(params?: {

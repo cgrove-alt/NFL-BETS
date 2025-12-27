@@ -171,10 +171,16 @@ class TotalsModel(BaseModel):
     """
 
     MODEL_TYPE = "totals_quantile"
-    VERSION = "1.0.0"
+    VERSION = "1.1.0"  # Upgraded with pace adjustment
 
     # Quantiles to predict
     QUANTILES = [0.10, 0.25, 0.50, 0.75, 0.90]
+
+    # Pace adjustment constants
+    # NFL average seconds per play (neutral situations) is ~27 seconds
+    LEAGUE_AVG_PACE = 27.0
+    # Maximum pace adjustment factor (±10% probability shift)
+    MAX_PACE_ADJUSTMENT = 0.10
 
     # Default model parameters
     MODEL_PARAMS = {
@@ -540,6 +546,8 @@ class TotalsModel(BaseModel):
         line: Optional[float] = None,
         over_odds: Optional[int] = None,
         under_odds: Optional[int] = None,
+        home_pace: Optional[float] = None,
+        away_pace: Optional[float] = None,
     ) -> TotalsPrediction:
         """
         Make a single game prediction with full context.
@@ -552,6 +560,8 @@ class TotalsModel(BaseModel):
             line: Vegas total line (e.g., 47.5)
             over_odds: Over American odds (e.g., -110)
             under_odds: Under American odds (e.g., -110)
+            home_pace: Home team seconds_per_play (for pace adjustment)
+            away_pace: Away team seconds_per_play (for pace adjustment)
 
         Returns:
             TotalsPrediction with all prediction details
@@ -583,7 +593,19 @@ class TotalsModel(BaseModel):
         under_edge = None
 
         if line is not None:
-            over_prob = float(self.predict_proba(X, np.array([line]))[0])
+            # Calculate over probability with optional pace adjustment
+            if home_pace is not None and away_pace is not None:
+                # Use pace-adjusted probability
+                over_prob = float(self.predict_proba_with_pace(
+                    X, np.array([line]),
+                    np.array([home_pace]), np.array([away_pace])
+                )[0])
+                self.logger.debug(
+                    f"Pace adjustment applied: home={home_pace:.1f}s, away={away_pace:.1f}s"
+                )
+            else:
+                # Use raw probability (no pace data available)
+                over_prob = float(self.predict_proba(X, np.array([line]))[0])
             under_prob = 1.0 - over_prob
 
             if over_odds is not None and under_odds is not None:
@@ -628,6 +650,87 @@ class TotalsModel(BaseModel):
             return 100.0 / (odds + 100.0)
         else:
             return abs(odds) / (abs(odds) + 100.0)
+
+    def _calculate_pace_adjustment(
+        self,
+        home_pace: float,
+        away_pace: float,
+    ) -> float:
+        """
+        Calculate pace adjustment factor for Over/Under probability.
+
+        CORE INSIGHT: High EPA + Slow Pace = FEWER scoring opportunities.
+        A team can be extremely efficient per play, but if they run fewer plays
+        due to slow tempo, total points will be lower.
+
+        Args:
+            home_pace: Home team seconds_per_play_neutral (higher = slower)
+            away_pace: Away team seconds_per_play_neutral (higher = slower)
+
+        Returns:
+            Adjustment factor to apply to Over probability.
+            Positive = boost Over probability (fast-paced game expected)
+            Negative = reduce Over probability (slow-paced game expected)
+        """
+        # Combined pace: average of both teams
+        combined_pace = (home_pace + away_pace) / 2.0
+
+        # Pace deviation from league average
+        # Positive = slower than average (fewer plays, less scoring)
+        # Negative = faster than average (more plays, more scoring)
+        pace_deviation = combined_pace - self.LEAGUE_AVG_PACE
+
+        # Normalize: typically ±3 seconds deviation from mean
+        # Convert to adjustment factor
+        # Slower games (positive deviation) -> negative adjustment (favor Under)
+        # Faster games (negative deviation) -> positive adjustment (favor Over)
+        raw_adjustment = -pace_deviation / 3.0 * 0.05  # ~5% per 3 seconds deviation
+
+        # Clamp to maximum adjustment
+        adjustment = max(-self.MAX_PACE_ADJUSTMENT, min(self.MAX_PACE_ADJUSTMENT, raw_adjustment))
+
+        return adjustment
+
+    def predict_proba_with_pace(
+        self,
+        X: Union[pl.DataFrame, np.ndarray],
+        lines: np.ndarray,
+        home_paces: np.ndarray,
+        away_paces: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Predict over probabilities with pace adjustment.
+
+        This method applies the key insight that tempo affects total scoring.
+        High-EPA teams with slow pace score fewer points than raw EPA suggests.
+
+        Args:
+            X: Feature matrix
+            lines: Vegas lines to calculate over probability for
+            home_paces: Home team seconds_per_play for each game
+            away_paces: Away team seconds_per_play for each game
+
+        Returns:
+            Array of pace-adjusted over probabilities
+        """
+        self._validate_fitted()
+
+        # Get raw probabilities
+        raw_probs = self.predict_proba(X, lines)
+
+        # Apply pace adjustment to each game
+        adjusted_probs = np.zeros_like(raw_probs)
+        for i in range(len(raw_probs)):
+            # Calculate pace adjustment
+            pace_adj = self._calculate_pace_adjustment(home_paces[i], away_paces[i])
+
+            # Apply adjustment (additive to probability)
+            adjusted_prob = raw_probs[i] + pace_adj
+
+            # Clamp to valid probability range [0.01, 0.99]
+            adjusted_probs[i] = max(0.01, min(0.99, adjusted_prob))
+
+        return adjusted_probs
 
     def get_feature_importance(self) -> dict[str, float]:
         """

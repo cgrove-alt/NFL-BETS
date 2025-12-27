@@ -711,6 +711,17 @@ class ValueDetector:
                     continue
 
                 # Get model prediction with line context
+                # Extract pace features for tempo adjustment
+                # Look for seconds_per_play features (higher = slower pace)
+                home_pace = game_features.get(
+                    "home_seconds_per_play_neutral_5g",
+                    game_features.get("home_seconds_per_play_5g", None)
+                )
+                away_pace = game_features.get(
+                    "away_seconds_per_play_neutral_5g",
+                    game_features.get("away_seconds_per_play_5g", None)
+                )
+
                 try:
                     prediction = self.totals_model.predict_game(
                         features=game_features,
@@ -720,6 +731,8 @@ class ValueDetector:
                         line=float(total_line),
                         over_odds=odds.get("over_odds", -110),
                         under_odds=odds.get("under_odds", -110),
+                        home_pace=home_pace,
+                        away_pace=away_pace,
                     )
                 except Exception as e:
                     logger.warning(f"Failed to predict totals {game_id}: {e}")

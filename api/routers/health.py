@@ -30,6 +30,52 @@ async def health_check(request: Request) -> dict[str, Any]:
     }
 
 
+@router.get("/health/status")
+async def detailed_status(request: Request) -> dict[str, Any]:
+    """
+    Detailed health status endpoint for frontend live connection indicator.
+
+    Returns:
+        - status: "online" | "degraded" | "offline"
+        - bets_in_memory: Number of value bets currently detected
+        - last_update: ISO timestamp of last data refresh
+        - scheduler_running: Boolean
+        - models_loaded: Boolean
+    """
+    app_state = request.app.state.app_state
+
+    # Get full health status
+    components = app_state.get_health_status()
+
+    # Determine status level
+    if not components.get("initialized", False):
+        status = "offline"
+    elif components.get("scheduler_running", False) and components.get("startup_refresh_complete", False):
+        status = "online"
+    else:
+        status = "degraded"
+
+    # Count loaded models
+    models_loaded = False
+    if app_state.model_manager:
+        try:
+            # Check if at least spread model is loaded
+            models_loaded = app_state.value_detector is not None and \
+                           app_state.value_detector.spread_model is not None
+        except Exception:
+            pass
+
+    return {
+        "status": status,
+        "bets_in_memory": components.get("bets_in_memory", 0),
+        "last_update": components.get("last_data_refresh"),
+        "scheduler_running": components.get("scheduler_running", False),
+        "models_loaded": models_loaded,
+        "startup_complete": components.get("startup_refresh_complete", False),
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
 @router.get("/health/ready")
 async def readiness_check(request: Request) -> dict[str, Any]:
     """

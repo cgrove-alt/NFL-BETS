@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   RefreshCw,
@@ -14,6 +14,9 @@ import {
   Cpu,
   CheckCircle,
   XCircle,
+  Wifi,
+  WifiOff,
+  Zap,
 } from 'lucide-react';
 import {
   getValueBets,
@@ -23,6 +26,7 @@ import {
   getGames,
   getGameDetail,
   getGamePredictions,
+  getDetailedHealth,
   ValueBetsResponse,
   BankrollSummary,
   ModelsStatus,
@@ -31,6 +35,7 @@ import {
   GameInfo,
   ValueBet,
   GamePredictions,
+  DetailedHealthStatus,
 } from '@/lib/api';
 import BankrollWidget from '@/components/BankrollWidget';
 import ModelStatusBadge from '@/components/ModelStatusBadge';
@@ -40,6 +45,85 @@ import { Badge } from '@/components/ui/Badge';
 import { BestBets } from '@/components/BestBets';
 import { GameSelector } from '@/components/GameSelector';
 import { GameBetsDisplay } from '@/components/GameBetsDisplay';
+
+// Live Connection Indicator Component
+function LiveConnectionIndicator({
+  status,
+  betsCount,
+  lastUpdate
+}: {
+  status: 'online' | 'degraded' | 'offline' | 'connecting';
+  betsCount: number;
+  lastUpdate: string | null;
+}) {
+  const getStatusConfig = () => {
+    switch (status) {
+      case 'online':
+        return {
+          icon: Wifi,
+          text: 'Live Odds Active',
+          bgColor: 'bg-success/10',
+          textColor: 'text-success',
+          dotColor: 'bg-success',
+          pulse: true,
+        };
+      case 'degraded':
+        return {
+          icon: Zap,
+          text: 'Connecting...',
+          bgColor: 'bg-warning/10',
+          textColor: 'text-warning',
+          dotColor: 'bg-warning',
+          pulse: true,
+        };
+      case 'connecting':
+        return {
+          icon: Zap,
+          text: 'Connecting...',
+          bgColor: 'bg-brand-500/10',
+          textColor: 'text-brand-500',
+          dotColor: 'bg-brand-500',
+          pulse: true,
+        };
+      case 'offline':
+      default:
+        return {
+          icon: WifiOff,
+          text: 'Backend Offline',
+          bgColor: 'bg-danger/10',
+          textColor: 'text-danger',
+          dotColor: 'bg-danger',
+          pulse: false,
+        };
+    }
+  };
+
+  const config = getStatusConfig();
+  const Icon = config.icon;
+
+  return (
+    <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full ${config.bgColor}`}>
+      {/* Pulsing dot */}
+      <span className="relative flex h-2 w-2">
+        {config.pulse && (
+          <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${config.dotColor} opacity-75`} />
+        )}
+        <span className={`relative inline-flex rounded-full h-2 w-2 ${config.dotColor}`} />
+      </span>
+
+      <Icon className={`w-3.5 h-3.5 ${config.textColor}`} />
+      <span className={`text-xs font-medium ${config.textColor}`}>
+        {config.text}
+      </span>
+
+      {status === 'online' && betsCount > 0 && (
+        <span className="text-xs text-text-muted">
+          • {betsCount} bets
+        </span>
+      )}
+    </div>
+  );
+}
 
 export default function Dashboard() {
   const [valueBets, setValueBets] = useState<ValueBetsResponse | null>(null);
@@ -51,11 +135,54 @@ export default function Dashboard() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Live connection state
+  const [connectionStatus, setConnectionStatus] = useState<'online' | 'degraded' | 'offline' | 'connecting'>('connecting');
+  const [healthData, setHealthData] = useState<DetailedHealthStatus | null>(null);
+
   // Game selection state
   const [selectedGame, setSelectedGame] = useState<GameInfo | null>(null);
   const [selectedGameBets, setSelectedGameBets] = useState<ValueBet[]>([]);
   const [selectedGamePredictions, setSelectedGamePredictions] = useState<GamePredictions | null>(null);
   const [isLoadingGameDetail, setIsLoadingGameDetail] = useState(false);
+
+  // Track if we've auto-selected best game
+  const hasAutoSelected = useRef(false);
+
+  // Poll health endpoint for live connection status
+  const pollHealth = useCallback(async () => {
+    try {
+      const health = await getDetailedHealth();
+      setHealthData(health);
+      setConnectionStatus(health.status);
+    } catch {
+      setConnectionStatus('offline');
+      setHealthData(null);
+    }
+  }, []);
+
+  // Auto-select best game logic
+  const autoSelectBestGame = useCallback((games: GameInfo[]) => {
+    if (hasAutoSelected.current || games.length === 0) return;
+
+    // Find the game with the highest value_bet_count
+    const bestGame = games.reduce((best, game) => {
+      if (game.value_bet_count > (best?.value_bet_count || 0)) {
+        return game;
+      }
+      // Tie-breaker: use best_edge
+      if (game.value_bet_count === (best?.value_bet_count || 0)) {
+        if ((game.best_edge || 0) > (best?.best_edge || 0)) {
+          return game;
+        }
+      }
+      return best;
+    }, null as GameInfo | null);
+
+    if (bestGame && bestGame.value_bet_count > 0) {
+      hasAutoSelected.current = true;
+      handleSelectGame(bestGame);
+    }
+  }, []);
 
   const fetchData = async (showRefreshing = false) => {
     if (showRefreshing) setIsRefreshing(true);
@@ -74,6 +201,11 @@ export default function Dashboard() {
       setJobsStatus(jobs);
       setGamesData(games);
       setError(null);
+
+      // Auto-select best game on first load
+      if (games?.games && !hasAutoSelected.current) {
+        autoSelectBestGame(games.games);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch data');
     } finally {
@@ -83,11 +215,21 @@ export default function Dashboard() {
   };
 
   useEffect(() => {
+    // Initial fetch
     fetchData();
-    // Refresh every 30 seconds
-    const interval = setInterval(() => fetchData(false), 30000);
-    return () => clearInterval(interval);
-  }, []);
+    pollHealth();
+
+    // Poll health every 5 seconds for live status
+    const healthInterval = setInterval(pollHealth, 5000);
+
+    // Refresh data every 30 seconds
+    const dataInterval = setInterval(() => fetchData(false), 30000);
+
+    return () => {
+      clearInterval(healthInterval);
+      clearInterval(dataInterval);
+    };
+  }, [pollHealth]);
 
   const handleSelectGame = async (game: GameInfo | null) => {
     setSelectedGame(game);
@@ -144,6 +286,13 @@ export default function Dashboard() {
             </div>
 
             <div className="flex items-center gap-3">
+              {/* Live Connection Indicator */}
+              <LiveConnectionIndicator
+                status={connectionStatus}
+                betsCount={healthData?.bets_in_memory || 0}
+                lastUpdate={healthData?.last_update || null}
+              />
+
               {jobsStatus && (
                 <Badge
                   variant={jobsStatus.scheduler_running ? 'success' : 'danger'}
@@ -173,6 +322,30 @@ export default function Dashboard() {
           </div>
         </div>
       </header>
+
+      {/* Backend Offline Warning Banner */}
+      <AnimatePresence>
+        {connectionStatus === 'offline' && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="bg-danger/10 border-b border-danger/20"
+          >
+            <div className="max-w-7xl mx-auto px-4 py-3 sm:px-6 lg:px-8">
+              <div className="flex items-center gap-3">
+                <WifiOff className="w-5 h-5 text-danger flex-shrink-0" />
+                <div>
+                  <p className="text-sm font-medium text-danger">Backend Offline - Check Connection</p>
+                  <p className="text-xs text-danger/70">
+                    Unable to connect to the NFL Bets API. Data may be stale.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Main content */}
       <main className="max-w-7xl mx-auto px-4 py-6 sm:px-6 lg:px-8">
@@ -212,6 +385,12 @@ export default function Dashboard() {
                 {gamesData && (
                   <Badge variant="default" size="sm">
                     {gamesData.count} games
+                  </Badge>
+                )}
+                {selectedGame && selectedGame.value_bet_count > 0 && (
+                  <Badge variant="success" size="sm">
+                    <Zap className="w-3 h-3 mr-1" />
+                    {selectedGame.value_bet_count} value bets
                   </Badge>
                 )}
               </div>
