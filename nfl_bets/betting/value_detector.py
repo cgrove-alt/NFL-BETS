@@ -482,7 +482,7 @@ class ValueDetector:
             else:
                 model_prob = 0.5 - (spread_diff / POINTS_PER_PCT) / 100
 
-            description = f"{home_team} {line:+.1f}"
+            description = f"{home_team} {line:+.1f} vs {away_team}"
         else:
             line = -vegas_spread
             market_odds = away_odds
@@ -495,7 +495,7 @@ class ValueDetector:
             else:
                 model_prob = 0.5 - (spread_diff / POINTS_PER_PCT) / 100
 
-            description = f"{away_team} {line:+.1f}"
+            description = f"{away_team} {line:+.1f} @ {home_team}"
 
         # Clamp probability
         model_prob = max(0.01, min(0.99, model_prob))
@@ -642,12 +642,12 @@ class ValueDetector:
             market_odds = home_ml_odds
             opp_odds = away_ml_odds
             model_prob = prediction.home_win_prob
-            description = f"{home_team} ML"
+            description = f"{home_team} ML vs {away_team}"
         else:
             market_odds = away_ml_odds
             opp_odds = home_ml_odds
             model_prob = prediction.away_win_prob
-            description = f"{away_team} ML"
+            description = f"{away_team} ML @ {home_team}"
 
         # Calculate edge
         edge, ev, raw_edge = self._calculate_edge_and_ev(
@@ -805,12 +805,12 @@ class ValueDetector:
             market_odds = over_odds
             opp_odds = under_odds
             model_prob = prediction.over_prob or 0.5
-            description = f"Over {total_line}"
+            description = f"Over {total_line} ({away_team}@{home_team})"
         else:
             market_odds = under_odds
             opp_odds = over_odds
             model_prob = prediction.under_prob or 0.5
-            description = f"Under {total_line}"
+            description = f"Under {total_line} ({away_team}@{home_team})"
 
         # Calculate edge
         edge, ev, raw_edge = self._calculate_edge_and_ev(
@@ -871,13 +871,13 @@ class ValueDetector:
             market_odds = home_odds
             opp_odds = away_odds
             model_prob = prediction.home_cover_prob
-            description = f"{home_team} {line:+.1f}"
+            description = f"{home_team} {line:+.1f} vs {away_team}"
         else:
             line = -spread
             market_odds = away_odds
             opp_odds = home_odds
             model_prob = 1 - prediction.home_cover_prob
-            description = f"{away_team} {line:+.1f}"
+            description = f"{away_team} {line:+.1f} @ {home_team}"
 
         # Calculate edge
         edge, ev, raw_edge = self._calculate_edge_and_ev(
