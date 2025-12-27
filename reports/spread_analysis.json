@@ -1,0 +1,84 @@
+{
+  "model_type": "spread",
+  "seasons": [
+    2021,
+    2022,
+    2023,
+    2024,
+    2025
+  ],
+  "analysis_date": "2025-12-27T00:58:04.895586",
+  "backtest": {
+    "model_type": "spread",
+    "overall_roi": 0.0,
+    "overall_win_rate": 0.0,
+    "total_bets": 0,
+    "season_trend": 0.0,
+    "by_season": []
+  },
+  "calibration": {
+    "error": "'Settings' object has no attribute 'load_pbp_data'"
+  },
+  "edge_validation": {
+    "model_type": "spread",
+    "optimal_min_edge": 0.04,
+    "edge_buckets": [
+      {
+        "min": 0.01,
+        "max": 0.02,
+        "n_bets": 233,
+        "win_rate": 0.5622317596566524,
+        "roi": 0.0733515411627,
+        "is_significant": "False"
+      },
+      {
+        "min": 0.02,
+        "max": 0.03,
+        "n_bets": 78,
+        "win_rate": 0.5,
+        "roi": -0.04545454545454545,
+        "is_significant": "False"
+      },
+      {
+        "min": 0.03,
+        "max": 0.04,
+        "n_bets": 54,
+        "win_rate": 0.5740740740740741,
+        "roi": 0.09595959595959593,
+        "is_significant": "False"
+      },
+      {
+        "min": 0.04,
+        "max": 0.05,
+        "n_bets": 38,
+        "win_rate": 0.6578947368421053,
+        "roi": 0.2559808612440191,
+        "is_significant": "False"
+      },
+      {
+        "min": 0.05,
+        "max": 0.07,
+        "n_bets": 45,
+        "win_rate": 0.5111111111111111,
+        "roi": -0.024242424242424225,
+        "is_significant": "False"
+      },
+      {
+        "min": 0.07,
+        "max": 0.1,
+        "n_bets": 34,
+        "win_rate": 0.6764705882352942,
+        "roi": 0.2914438502673797,
+        "is_significant": "False"
+      }
+    ],
+    "edges_are_real": "False",
+    "p_value": 0.2916
+  },
+  "model_comparison": {
+    "error": "'Settings' object has no attribute 'load_pbp_data'"
+  },
+  "feature_analysis": {
+    "error": "'Settings' object has no attribute 'load_pbp_data'"
+  }
+}

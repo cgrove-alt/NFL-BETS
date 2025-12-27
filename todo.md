@@ -230,3 +230,69 @@ This ensures that `2024_17_HOU_LAC` matches `2025_17_HOU_LAC` since the only dif
 2. Check Railway logs for matching attempts: `[game_id] Looking for match in bet game_ids: [...]`
 3. Select a game with value bets - bets should now display correctly
 4. Test with fallback data by temporarily disabling scheduler
+
+---
+
+## Model Analysis Framework Fix (2025-12-27)
+
+### Problem Statement
+The `run_analysis.py` script failed with multiple errors:
+1. Several analyses failed with `'Settings' object has no attribute 'load_pbp_data'` (transient/intermittent)
+2. Feature analysis failed with `ZeroDivisionError: division by zero`
+3. Feature importance returned empty dicts due to feature name mismatch
+
+### Root Causes Identified
+
+#### Issue 1: Division by Zero in Feature Analysis Summary
+**File:** `nfl_bets/analysis/feature_analysis.py:135`
+```python
+f"Stable Features: {self.n_stable_features} ({100*self.n_stable_features/self.n_features:.0f}%)"
+```
+When `n_features` is 0, this causes a division by zero.
+
+#### Issue 2: Feature Names Not Passed When Using NumPy Arrays
+**File:** `nfl_bets/analysis/feature_analysis.py:330-338`
+The `analyze_from_model` method passed NumPy arrays to the model, but `_prepare_features` only sets `feature_names` when given a Polars DataFrame.
+
+#### Issue 3: Feature Importance Uses Wrong Feature Names After Selection
+**File:** `nfl_bets/models/spread_model.py:918`
+```python
+for i, name in enumerate(self.feature_names):
+```
+When feature selection reduces 375 features to 50, `self.feature_names` still has 375 names, causing index out of bounds.
+
+### Fixes Implemented
+
+**1. `nfl_bets/analysis/feature_analysis.py`**
+- Added early return in `summary()` when `n_features` is 0
+- Protected against division by zero with conditional check
+- Modified `analyze_from_model()` to convert NumPy arrays to Polars DataFrames with proper schema
+- Added logging when `get_feature_importance()` returns empty dict
+
+**2. `nfl_bets/models/spread_model.py`**
+- Updated `get_feature_importance()` to use `selected_feature_names` when feature selection is applied
+- Added length validation before iterating to prevent index out of bounds
+- Added warning logs for dimension mismatches
+
+### Results After Fix
+All 5 analyses now complete successfully:
+
+| Analysis | Status | Key Findings |
+|----------|--------|--------------|
+| Backtest | ✓ | 5.9% ROI, 55.5% win rate across 474 bets |
+| Calibration | ✓ | ECE=0.16, not well calibrated |
+| Edge Validation | ✓ | Optimal min edge = 4%, p-value = 0.29 |
+| Model Comparison | ✓ | MAE 10.0 vs Vegas 1.5 |
+| Feature Analysis | ✓ | 65 features, 18 stable, top: opening_spread |
+
+### Top 10 Most Important Features
+1. `opening_spread` (importance: 27.6, stable)
+2. `current_spread` (importance: 11.5, stable)
+3. `home_implied_score` (importance: 10.2, stable)
+4. `diff_success_rate_ema_10g` (importance: 6.7, stable)
+5. `home_adj_epa_per_play_10g` (importance: 6.5, stable)
+6. `diff_explosive_play_rate_5g` (importance: 6.4)
+7. `away_implied_score` (importance: 5.8, stable)
+8. `diff_success_rate_ema_3g` (importance: 5.7)
+9. `diff_cpoe_10g` (importance: 5.7)
+10. `diff_adj_epa_per_play_3g` (importance: 4.8)

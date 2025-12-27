@@ -1,0 +1,175 @@
+{
+  "model_type": "spread",
+  "seasons": [
+    2021,
+    2022,
+    2023,
+    2024,
+    2025
+  ],
+  "analysis_date": "2025-12-27T01:18:55.330790",
+  "backtest": {
+    "model_type": "spread",
+    "overall_roi": 0.05926352128883773,
+    "overall_win_rate": 0.5548523206751055,
+    "total_bets": 474,
+    "season_trend": -0.02079545454545456,
+    "by_season": [
+      {
+        "season": 2024,
+        "roi": 0.06909090909090908,
+        "win_rate": 0.56,
+        "n_bets": 250
+      },
+      {
+        "season": 2025,
+        "roi": 0.04829545454545453,
+        "win_rate": 0.5491071428571429,
+        "n_bets": 224
+      }
+    ]
+  },
+  "calibration": {
+    "model_type": "spread",
+    "ece": 0.16021330860190125,
+    "mce": 0.16021330860190125,
+    "brier_score": 0.27484837760991854,
+    "is_well_calibrated": false,
+    "is_overconfident": false,
+    "is_underconfident": false
+  },
+  "edge_validation": {
+    "model_type": "spread",
+    "optimal_min_edge": 0.04,
+    "edge_buckets": [
+      {
+        "min": 0.01,
+        "max": 0.02,
+        "n_bets": 233,
+        "win_rate": 0.5622317596566524,
+        "roi": 0.0733515411627,
+        "is_significant": "False"
+      },
+      {
+        "min": 0.02,
+        "max": 0.03,
+        "n_bets": 78,
+        "win_rate": 0.5,
+        "roi": -0.04545454545454545,
+        "is_significant": "False"
+      },
+      {
+        "min": 0.03,
+        "max": 0.04,
+        "n_bets": 54,
+        "win_rate": 0.5740740740740741,
+        "roi": 0.09595959595959593,
+        "is_significant": "False"
+      },
+      {
+        "min": 0.04,
+        "max": 0.05,
+        "n_bets": 38,
+        "win_rate": 0.6578947368421053,
+        "roi": 0.2559808612440191,
+        "is_significant": "False"
+      },
+      {
+        "min": 0.05,
+        "max": 0.07,
+        "n_bets": 45,
+        "win_rate": 0.5111111111111111,
+        "roi": -0.024242424242424225,
+        "is_significant": "False"
+      },
+      {
+        "min": 0.07,
+        "max": 0.1,
+        "n_bets": 34,
+        "win_rate": 0.6764705882352942,
+        "roi": 0.2914438502673797,
+        "is_significant": "False"
+      }
+    ],
+    "edges_are_real": "False",
+    "p_value": 0.2916
+  },
+  "model_comparison": {
+    "model_type": "spread",
+    "beats_vegas": "False",
+    "model_mae": 10.019262852106454,
+    "vegas_mae": 1.5454383134961975,
+    "mae_improvement": -8.473824538610257,
+    "model_ats_rate": 0.4581497797356828,
+    "model_roi": -0.12535042050460551,
+    "p_value": 0.907880623713117
+  },
+  "feature_analysis": {
+    "model_type": "spread",
+    "n_features": 65,
+    "n_stable_features": 18,
+    "concentration": 0.43625231333188647,
+    "top_features": [
+      {
+        "name": "opening_spread",
+        "importance": 27.613072341684795,
+        "rank": 1,
+        "is_stable": true
+      },
+      {
+        "name": "current_spread",
+        "importance": 11.529496195544102,
+        "rank": 2,
+        "is_stable": true
+      },
+      {
+        "name": "home_implied_score",
+        "importance": 10.239141387288523,
+        "rank": 3,
+        "is_stable": true
+      },
+      {
+        "name": "diff_success_rate_ema_10g",
+        "importance": 6.666669979636531,
+        "rank": 4,
+        "is_stable": true
+      },
+      {
+        "name": "home_adj_epa_per_play_10g",
+        "importance": 6.450632616904305,
+        "rank": 5,
+        "is_stable": true
+      },
+      {
+        "name": "diff_explosive_play_rate_5g",
+        "importance": 6.449049411470398,
+        "rank": 6,
+        "is_stable": false
+      },
+      {
+        "name": "away_implied_score",
+        "importance": 5.7544687134619,
+        "rank": 7,
+        "is_stable": true
+      },
+      {
+        "name": "diff_success_rate_ema_3g",
+        "importance": 5.679755701406824,
+        "rank": 8,
+        "is_stable": false
+      },
+      {
+        "name": "diff_cpoe_10g",
+        "importance": 5.675590571467089,
+        "rank": 9,
+        "is_stable": false
+      },
+      {
+        "name": "diff_adj_epa_per_play_3g",
+        "importance": 4.769824046080722,
+        "rank": 10,
+        "is_stable": false
+      }
+    ]
+  }
+}

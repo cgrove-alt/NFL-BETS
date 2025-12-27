@@ -912,24 +912,40 @@ class SpreadModel(BaseModel):
 
         importance = {}
 
+        # Use selected feature names if feature selection was applied, otherwise original names
+        feature_names = self.selected_feature_names if self.selected_feature_names else self.feature_names
+
+        if not feature_names:
+            self.logger.warning("No feature names available for importance calculation")
+            return {}
+
         # XGBoost importance
         if self.xgb_model is not None and self.weights.get("xgb", 0) > 0:
             xgb_imp = self.xgb_model.feature_importances_
-            for i, name in enumerate(self.feature_names):
-                importance[name] = importance.get(name, 0) + self.weights["xgb"] * xgb_imp[i]
+            if len(xgb_imp) != len(feature_names):
+                self.logger.warning(f"XGB importance mismatch: {len(xgb_imp)} vs {len(feature_names)} features")
+            else:
+                for i, name in enumerate(feature_names):
+                    importance[name] = importance.get(name, 0) + self.weights["xgb"] * xgb_imp[i]
 
         # LightGBM importance
         if self.lgb_model is not None and self.weights.get("lgb", 0) > 0:
             lgb_imp = self.lgb_model.feature_importances_
-            for i, name in enumerate(self.feature_names):
-                importance[name] = importance.get(name, 0) + self.weights["lgb"] * lgb_imp[i]
+            if len(lgb_imp) != len(feature_names):
+                self.logger.warning(f"LGB importance mismatch: {len(lgb_imp)} vs {len(feature_names)} features")
+            else:
+                for i, name in enumerate(feature_names):
+                    importance[name] = importance.get(name, 0) + self.weights["lgb"] * lgb_imp[i]
 
         # Ridge importance (use absolute coefficients)
         if self.ridge_model is not None and self.weights.get("ridge", 0) > 0:
             ridge_imp = np.abs(self.ridge_model.coef_)
-            ridge_imp = ridge_imp / np.sum(ridge_imp)  # Normalize
-            for i, name in enumerate(self.feature_names):
-                importance[name] = importance.get(name, 0) + self.weights["ridge"] * ridge_imp[i]
+            if len(ridge_imp) != len(feature_names):
+                self.logger.warning(f"Ridge importance mismatch: {len(ridge_imp)} vs {len(feature_names)} features")
+            else:
+                ridge_imp = ridge_imp / np.sum(ridge_imp)  # Normalize
+                for i, name in enumerate(feature_names):
+                    importance[name] = importance.get(name, 0) + self.weights["ridge"] * ridge_imp[i]
 
         # Sort by importance
         return dict(sorted(importance.items(), key=lambda x: x[1], reverse=True))
