@@ -144,6 +144,8 @@ export interface GamesResponse {
   is_demo?: boolean;
   is_initializing?: boolean;
   retry_after_seconds?: number | null;
+  // Hard fallback mode - indicates emergency hardcoded data
+  is_fallback?: boolean;
 }
 
 export interface GameDetailResponse {

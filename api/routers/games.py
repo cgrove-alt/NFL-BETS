@@ -39,6 +39,8 @@ class GamesListResponse(BaseModel):
     is_demo: bool = False
     is_initializing: bool = False
     retry_after_seconds: Optional[int] = None
+    # Fallback mode flag - indicates emergency hardcoded data
+    is_fallback: bool = False
 
 
 def _build_demo_games(app_state) -> list[GameResponse]:
@@ -76,6 +78,67 @@ def _build_demo_games(app_state) -> list[GameResponse]:
                 away_team=game.get("away_team", ""),
                 kickoff=game.get("kickoff", ""),
                 week=game.get("week", 1),
+                season=game.get("season", 2024),
+                value_bet_count=len(game_bets),
+                best_edge=getattr(best_bet, "edge", None) if best_bet else None,
+                best_bet_description=getattr(best_bet, "description", None) if best_bet else None,
+                model_prediction=getattr(best_bet, "model_prediction", None) if best_bet else None,
+                model_confidence=getattr(best_bet, "model_probability", None) if best_bet else None,
+                vegas_line=game.get("spread"),
+            )
+        )
+
+    # Sort by kickoff time, then by value bet count (most bets first)
+    response_games.sort(key=lambda g: (g.kickoff, -g.value_bet_count))
+
+    return response_games
+
+
+def _build_fallback_games(app_state) -> list[GameResponse]:
+    """
+    Build game responses from HARD FALLBACK data.
+
+    Called when:
+    - Scheduler is dead
+    - Live data fetch failed
+    - No games available from pipeline
+
+    Args:
+        app_state: Application state with fallback methods
+
+    Returns:
+        List of GameResponse objects from hardcoded fallback data
+    """
+    logger.warning("🚨 FALLBACK: Building games from hardcoded fallback data")
+
+    response_games = []
+
+    # Get fallback games and bets
+    fallback_games = app_state.get_fallback_games()
+    fallback_bets = app_state.get_fallback_data()
+
+    # Group bets by game
+    bets_by_game = defaultdict(list)
+    for bet in fallback_bets:
+        game_id = getattr(bet, "game_id", "")
+        bets_by_game[game_id].append(bet)
+
+    for game in fallback_games:
+        game_id = game.get("game_id", "")
+        game_bets = bets_by_game.get(game_id, [])
+
+        # Find best edge bet
+        best_bet = None
+        if game_bets:
+            best_bet = max(game_bets, key=lambda b: getattr(b, "edge", 0))
+
+        response_games.append(
+            GameResponse(
+                game_id=game_id,
+                home_team=game.get("home_team", ""),
+                away_team=game.get("away_team", ""),
+                kickoff=game.get("kickoff", ""),
+                week=game.get("week", 17),
                 season=game.get("season", 2024),
                 value_bet_count=len(game_bets),
                 best_edge=getattr(best_bet, "edge", None) if best_bet else None,
@@ -228,12 +291,20 @@ async def get_games(
     # Sort by kickoff time, then by value bet count (most bets first)
     response_games.sort(key=lambda g: (g.kickoff, -g.value_bet_count))
 
+    # HARD FALLBACK: If response_games is empty, use fallback data
+    is_fallback = False
+    if len(response_games) == 0:
+        logger.warning("🚨 No games from pipeline - activating HARD FALLBACK")
+        response_games = _build_fallback_games(app_state)
+        is_fallback = True
+
     return {
         "count": len(response_games),
         "games": response_games,
         "is_demo": False,
         "is_initializing": is_initializing,
         "retry_after_seconds": 5 if is_initializing and len(response_games) == 0 else None,
+        "is_fallback": is_fallback,
     }
 
 

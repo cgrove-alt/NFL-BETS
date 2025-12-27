@@ -149,6 +149,7 @@ export default function Dashboard() {
   const [isDemoMode, setIsDemoMode] = useState(false);
   const [isBackendInitializing, setIsBackendInitializing] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
+  const [isFallbackMode, setIsFallbackMode] = useState(false);
 
   // Game selection state
   const [selectedGame, setSelectedGame] = useState<GameInfo | null>(null);
@@ -205,6 +206,10 @@ export default function Dashboard() {
 
   const fetchData = async (showRefreshing = false, currentRetry = 0) => {
     if (showRefreshing) setIsRefreshing(true);
+
+    // Debug: Log API URL for troubleshooting
+    console.log('Using API URL:', process.env.NEXT_PUBLIC_API_URL || '(not set - using relative paths)');
+
     try {
       const [bets, bank, models, jobs, games] = await Promise.all([
         getValueBets().catch(() => null),
@@ -225,6 +230,17 @@ export default function Dashboard() {
       if (games?.is_demo) {
         setIsDemoMode(true);
       }
+
+      // Check for fallback mode from games response
+      if (games?.is_fallback) {
+        setIsFallbackMode(true);
+        console.warn('FALLBACK MODE: Using hardcoded backup data');
+      } else {
+        setIsFallbackMode(false);
+      }
+
+      // Debug: Log value bets count
+      console.log(`Received ${bets?.count || 0} value bets from API`);
 
       // Check for cold start / initializing state with retry logic
       if (games?.is_initializing && games?.count === 0 && games?.retry_after_seconds) {
@@ -393,9 +409,33 @@ export default function Dashboard() {
         )}
       </AnimatePresence>
 
+      {/* Fallback Mode Banner */}
+      <AnimatePresence>
+        {isFallbackMode && !isDemoMode && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="bg-warning/10 border-b border-warning/20"
+          >
+            <div className="max-w-7xl mx-auto px-4 py-3 sm:px-6 lg:px-8">
+              <div className="flex items-center gap-3">
+                <AlertCircle className="w-5 h-5 text-warning flex-shrink-0" />
+                <div>
+                  <p className="text-sm font-medium text-warning">Fallback Mode Active</p>
+                  <p className="text-xs text-warning/70">
+                    Scheduler not running. Showing backup data. Check backend logs for details.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Backend Initializing Banner */}
       <AnimatePresence>
-        {isBackendInitializing && !isDemoMode && (
+        {isBackendInitializing && !isDemoMode && !isFallbackMode && (
           <motion.div
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: 'auto' }}
@@ -409,6 +449,30 @@ export default function Dashboard() {
                   <p className="text-sm font-medium text-warning">System Initializing...</p>
                   <p className="text-xs text-warning/70">
                     Loading live odds data. {retryCount > 0 ? `Retry ${retryCount}/${MAX_RETRY_ATTEMPTS}` : 'Please wait...'}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Zero Bets Warning Banner */}
+      <AnimatePresence>
+        {connectionStatus === 'online' && valueBets?.count === 0 && !isDemoMode && !isFallbackMode && !isBackendInitializing && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="bg-danger/10 border-b border-danger/20"
+          >
+            <div className="max-w-7xl mx-auto px-4 py-3 sm:px-6 lg:px-8">
+              <div className="flex items-center gap-3">
+                <XCircle className="w-5 h-5 text-danger flex-shrink-0" />
+                <div>
+                  <p className="text-sm font-medium text-danger">Backend connected but returned 0 bets</p>
+                  <p className="text-xs text-danger/70">
+                    Check Scheduler. The odds polling job may have failed or no value bets were detected.
                   </p>
                 </div>
               </div>

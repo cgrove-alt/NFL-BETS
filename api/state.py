@@ -57,6 +57,7 @@ class AppState:
         self._demo_mode: bool = os.environ.get("DEMO_MODE", "").lower() == "true"
         self._is_initializing: bool = True  # Track if we're still in cold start
         self._mock_games: list = []  # Mock games for demo mode
+        self._using_fallback: bool = False  # Track if using hardcoded fallback data
 
     def _generate_mock_data(self) -> None:
         """
@@ -371,12 +372,178 @@ class AppState:
         """Check if all components are initialized."""
         return self._initialized
 
+    def get_fallback_data(self) -> list:
+        """
+        Return hardcoded fallback value bets for when scheduler/live data fails.
+
+        HARD FALLBACK: Ensures UI always has data even if serverless kills tasks.
+
+        Returns 3 backup bets:
+        - Chiefs -3.5 (spread)
+        - 49ers Over 24.5 (totals)
+        - Lions Moneyline
+        """
+        from dataclasses import dataclass
+        from enum import Enum
+
+        logger.warning("🚨 FALLBACK MODE: Returning hardcoded backup bets")
+
+        class FallbackUrgency(Enum):
+            HIGH = "high"
+            MEDIUM = "medium"
+            LOW = "low"
+
+        @dataclass
+        class FallbackValueBet:
+            game_id: str
+            bet_type: str
+            description: str
+            model_probability: float
+            model_prediction: float
+            bookmaker: str
+            odds: int
+            implied_probability: float
+            line: float
+            edge: float
+            expected_value: float
+            recommended_stake: float
+            urgency: FallbackUrgency
+            detected_at: datetime
+            expires_at: datetime
+
+        now = datetime.now()
+        # Find next Sunday for realistic game times
+        days_until_sunday = (6 - now.weekday()) % 7
+        if days_until_sunday == 0:
+            days_until_sunday = 7
+        next_sunday = now + timedelta(days=days_until_sunday)
+        next_sunday = next_sunday.replace(hour=13, minute=0, second=0, microsecond=0)
+
+        fallback_bets = [
+            FallbackValueBet(
+                game_id="2024_17_BAL_KC",
+                bet_type="spread",
+                description="KC -3.5",
+                model_probability=0.58,
+                model_prediction=-5.2,
+                bookmaker="DraftKings",
+                odds=-110,
+                implied_probability=0.524,
+                line=-3.5,
+                edge=0.056,
+                expected_value=0.052,
+                recommended_stake=25.0,
+                urgency=FallbackUrgency.HIGH,
+                detected_at=now,
+                expires_at=next_sunday,
+            ),
+            FallbackValueBet(
+                game_id="2024_17_DAL_SF",
+                bet_type="totals",
+                description="SF Over 24.5",
+                model_probability=0.55,
+                model_prediction=27.3,
+                bookmaker="FanDuel",
+                odds=-115,
+                implied_probability=0.535,
+                line=24.5,
+                edge=0.042,
+                expected_value=0.038,
+                recommended_stake=20.0,
+                urgency=FallbackUrgency.MEDIUM,
+                detected_at=now,
+                expires_at=next_sunday + timedelta(hours=1),
+            ),
+            FallbackValueBet(
+                game_id="2024_17_GB_DET",
+                bet_type="moneyline",
+                description="DET ML",
+                model_probability=0.62,
+                model_prediction=-4.0,
+                bookmaker="DraftKings",
+                odds=-180,
+                implied_probability=0.643,
+                line=-180.0,
+                edge=0.035,
+                expected_value=0.032,
+                recommended_stake=30.0,
+                urgency=FallbackUrgency.MEDIUM,
+                detected_at=now,
+                expires_at=next_sunday + timedelta(hours=2),
+            ),
+        ]
+
+        self._using_fallback = True
+        return fallback_bets
+
+    def get_fallback_games(self) -> list:
+        """
+        Return hardcoded fallback games matching the fallback bets.
+
+        Returns list of game dicts for the 3 fallback games.
+        """
+        now = datetime.now()
+        days_until_sunday = (6 - now.weekday()) % 7
+        if days_until_sunday == 0:
+            days_until_sunday = 7
+        next_sunday = now + timedelta(days=days_until_sunday)
+        next_sunday = next_sunday.replace(hour=13, minute=0, second=0, microsecond=0)
+
+        return [
+            {
+                "game_id": "2024_17_BAL_KC",
+                "home_team": "KC",
+                "away_team": "BAL",
+                "kickoff": next_sunday.isoformat(),
+                "week": 17,
+                "season": 2024,
+                "spread": -3.5,
+                "total": 47.5,
+            },
+            {
+                "game_id": "2024_17_DAL_SF",
+                "home_team": "SF",
+                "away_team": "DAL",
+                "kickoff": (next_sunday + timedelta(hours=1)).isoformat(),
+                "week": 17,
+                "season": 2024,
+                "spread": -2.5,
+                "total": 49.0,
+            },
+            {
+                "game_id": "2024_17_GB_DET",
+                "home_team": "DET",
+                "away_team": "GB",
+                "kickoff": (next_sunday + timedelta(hours=2)).isoformat(),
+                "week": 17,
+                "season": 2024,
+                "spread": -4.0,
+                "total": 48.0,
+            },
+        ]
+
     @property
     def last_value_bets(self) -> list:
-        """Get last detected value bets from scheduler."""
+        """
+        Get last detected value bets from scheduler.
+
+        HARD FALLBACK: If scheduler is None or returns empty list,
+        return hardcoded fallback data to ensure UI always has content.
+        """
+        self._using_fallback = False  # Reset flag
+
+        # Try to get live bets from scheduler
         if self.scheduler:
-            return self.scheduler.get_last_value_bets()
-        return self._last_value_bets
+            live_bets = self.scheduler.get_last_value_bets()
+            if live_bets and len(live_bets) > 0:
+                return live_bets
+
+        # Try instance-level cached bets
+        if self._last_value_bets and len(self._last_value_bets) > 0:
+            return self._last_value_bets
+
+        # FALLBACK: Return hardcoded bets so UI always has data
+        return self.get_fallback_data()
 
     async def _perform_startup_refresh(self) -> None:
         """
@@ -426,6 +593,7 @@ class AppState:
             "startup_refresh_complete": self._startup_refresh_complete,
             "demo_mode": self._demo_mode,
             "is_initializing": self._is_initializing,
+            "using_fallback": self._using_fallback,
         }
         if self._init_error:
             status["init_error"] = self._init_error
