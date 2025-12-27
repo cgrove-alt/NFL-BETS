@@ -8,11 +8,14 @@ Holds shared state across the application:
 - Bankroll manager
 - Scheduler orchestrator
 
-CRITICAL: Implements "Instant Start" pattern - data loads immediately on boot,
-not waiting for scheduler to trigger.
+CRITICAL: Uses ONLY REAL DATA from:
+- nflverse (schedules, play-by-play, rosters)
+- The Odds API (live betting lines)
+- ESPN (injuries, depth charts)
 
-DEMO MODE: If DEMO_MODE=true environment variable is set, returns mock data
-to ensure UI always shows data even during cold starts.
+NO FAKE DATA: All mock/demo/fallback data has been removed.
+If no value bets are detected, the system returns empty - this is valid
+and means the betting market is efficient (no exploitable edges found).
 """
 
 import asyncio
@@ -35,10 +38,7 @@ class AppState:
     Centralized application state.
 
     Initializes and manages lifecycle of all major components.
-
-    Supports:
-    - DEMO_MODE: Returns mock data for testing/cold starts
-    - Instant Load: Loads cached data while fresh data fetches in background
+    Uses ONLY REAL DATA - no mock/demo/fake data.
     """
 
     def __init__(self):
@@ -54,129 +54,8 @@ class AppState:
         self._init_error: str = None  # Track initialization error
         self._last_data_refresh: datetime = None  # Track when data was last refreshed
         self._startup_refresh_complete: bool = False  # Track if instant start completed
-        self._demo_mode: bool = os.environ.get("DEMO_MODE", "").lower() == "true"
         self._is_initializing: bool = True  # Track if we're still in cold start
-        self._mock_games: list = []  # Mock games for demo mode
-        self._using_fallback: bool = False  # Track if using hardcoded fallback data
-
-    def _generate_mock_data(self) -> None:
-        """
-        Generate mock/demo data for cold starts or DEMO_MODE.
-
-        Provides realistic-looking data so UI always has something to display.
-        """
-        from dataclasses import dataclass
-        from enum import Enum
-
-        logger.info("🎭 Generating DEMO MODE mock data...")
-
-        # Create mock Urgency enum
-        class MockUrgency(Enum):
-            HIGH = "high"
-            MEDIUM = "medium"
-            LOW = "low"
-
-        # Create mock ValueBet class
-        @dataclass
-        class MockValueBet:
-            game_id: str
-            bet_type: str
-            description: str
-            model_probability: float
-            model_prediction: float
-            bookmaker: str
-            odds: int
-            implied_probability: float
-            line: float
-            edge: float
-            expected_value: float
-            recommended_stake: float
-            urgency: MockUrgency
-            detected_at: datetime
-            expires_at: datetime
-
-        # Generate upcoming Sunday games
-        now = datetime.now()
-        # Find next Sunday
-        days_until_sunday = (6 - now.weekday()) % 7
-        if days_until_sunday == 0:
-            days_until_sunday = 7
-        next_sunday = now + timedelta(days=days_until_sunday)
-        next_sunday = next_sunday.replace(hour=13, minute=0, second=0, microsecond=0)
-
-        # Mock games for next week
-        mock_matchups = [
-            ("KC", "BAL", -3.5, 47.5),   # Chiefs vs Ravens
-            ("SF", "DAL", -2.5, 49.0),   # 49ers vs Cowboys
-            ("PHI", "BUF", 1.0, 52.5),   # Eagles vs Bills
-            ("DET", "GB", -4.0, 48.0),   # Lions vs Packers
-            ("MIA", "NYJ", -6.5, 44.0),  # Dolphins vs Jets
-        ]
-
-        self._mock_games = []
-        self._last_value_bets = []
-
-        for idx, (home, away, spread, total) in enumerate(mock_matchups):
-            game_time = next_sunday + timedelta(hours=idx * 0.5)  # Stagger kickoffs
-            game_id = f"2024_17_{away}_{home}"
-
-            # Create mock game data (will be used by games router)
-            self._mock_games.append({
-                "game_id": game_id,
-                "home_team": home,
-                "away_team": away,
-                "kickoff": game_time.isoformat(),
-                "week": 17,
-                "season": 2024,
-                "spread": spread,
-                "total": total,
-            })
-
-            # Create 1-3 value bets per game
-            if idx < 3:  # Only first 3 games have value bets in demo
-                # Spread bet
-                self._last_value_bets.append(MockValueBet(
-                    game_id=game_id,
-                    bet_type="spread",
-                    description=f"{home} {spread:+.1f}",
-                    model_probability=0.58 + (idx * 0.02),
-                    model_prediction=spread - 1.5,
-                    bookmaker="DraftKings",
-                    odds=-110,
-                    implied_probability=0.524,
-                    line=spread,
-                    edge=0.056 + (idx * 0.01),
-                    expected_value=0.052,
-                    recommended_stake=25.0,
-                    urgency=MockUrgency.HIGH if idx == 0 else MockUrgency.MEDIUM,
-                    detected_at=now,
-                    expires_at=game_time,
-                ))
-
-                # Add a totals bet for first game
-                if idx == 0:
-                    self._last_value_bets.append(MockValueBet(
-                        game_id=game_id,
-                        bet_type="totals",
-                        description=f"Under {total}",
-                        model_probability=0.55,
-                        model_prediction=total - 3.0,
-                        bookmaker="FanDuel",
-                        odds=-115,
-                        implied_probability=0.535,
-                        line=total,
-                        edge=0.042,
-                        expected_value=0.038,
-                        recommended_stake=20.0,
-                        urgency=MockUrgency.MEDIUM,
-                        detected_at=now,
-                        expires_at=game_time,
-                    ))
-
-        logger.info(f"🎭 Generated {len(self._mock_games)} mock games, {len(self._last_value_bets)} mock bets")
-        self._startup_refresh_complete = True
-        self._last_data_refresh = now
-        self._is_initializing = False
+        self._using_fallback: bool = False  # Legacy flag - always False now
 
     def _load_cached_data(self) -> bool:
         """
@@ -248,15 +127,8 @@ class AppState:
             logger.warning(f"Failed to save cache: {e}")
 
     async def initialize(self) -> None:
-        """Initialize all application components."""
+        """Initialize all application components with REAL DATA only."""
         if self._initialized:
-            return
-
-        # Check for DEMO_MODE first
-        if self._demo_mode:
-            logger.info("🎭 DEMO_MODE enabled - generating mock data")
-            self._generate_mock_data()
-            self._initialized = True
             return
 
         # Try to load cached data for instant display
@@ -472,9 +344,9 @@ class AppState:
             "bets_in_memory": bets_count,
             "last_data_refresh": self._last_data_refresh.isoformat() if self._last_data_refresh else None,
             "startup_refresh_complete": self._startup_refresh_complete,
-            "demo_mode": self._demo_mode,
+            "demo_mode": False,  # Demo mode removed - always False
             "is_initializing": self._is_initializing,
-            "using_fallback": self._using_fallback,
+            "using_fallback": False,  # Fallback data removed - always False
         }
         if self._init_error:
             status["init_error"] = self._init_error

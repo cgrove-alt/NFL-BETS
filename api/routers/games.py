@@ -204,58 +204,6 @@ def _game_ids_match(bet_game_id: str, query_game_id: str) -> bool:
     return False
 
 
-def _build_demo_games(app_state) -> list[GameResponse]:
-    """
-    Build game responses from demo/mock data.
-
-    Args:
-        app_state: Application state with mock games
-
-    Returns:
-        List of GameResponse objects from mock data
-    """
-    response_games = []
-
-    # Get value bets and group by game
-    value_bets = app_state.last_value_bets
-    bets_by_game = defaultdict(list)
-    for bet in value_bets:
-        game_id = _get_bet_game_id(bet)
-        if game_id:
-            bets_by_game[game_id].append(bet)
-
-    for game in app_state._mock_games:
-        game_id = get_val(game, "game_id", "")
-        game_bets = bets_by_game.get(game_id, [])
-
-        # Find best edge bet using universal accessor
-        best_bet = None
-        if game_bets:
-            best_bet = max(game_bets, key=_get_bet_edge)
-
-        response_games.append(
-            GameResponse(
-                game_id=game_id,
-                home_team=get_val(game, "home_team", ""),
-                away_team=get_val(game, "away_team", ""),
-                kickoff=get_val(game, "kickoff", ""),
-                week=get_val(game, "week", 1),
-                season=get_val(game, "season", 2024),
-                value_bet_count=len(game_bets),
-                best_edge=get_val(best_bet, "edge", None) if best_bet else None,
-                best_bet_description=get_val(best_bet, "description", None) if best_bet else None,
-                model_prediction=get_val(best_bet, "model_prediction", None) if best_bet else None,
-                model_confidence=get_val(best_bet, "model_probability", None) if best_bet else None,
-                vegas_line=get_val(game, "spread", None),
-            )
-        )
-
-    # Sort by kickoff time, then by value bet count (most bets first)
-    response_games.sort(key=lambda g: (g.kickoff, -g.value_bet_count))
-
-    return response_games
-
-
 def _build_fallback_games(app_state) -> list[GameResponse]:
     """
     Build game responses from HARD FALLBACK data.
@@ -342,25 +290,7 @@ async def get_games(
     app_state = request.app.state.app_state
 
     # Get status flags
-    is_demo = get_val(app_state, "_demo_mode", False)
     is_initializing = get_val(app_state, "_is_initializing", True)
-
-    # DEMO MODE: Return mock games immediately
-    if is_demo and app_state._mock_games:
-        logger.info("🎭 Returning DEMO MODE games")
-        demo_games = _build_demo_games(app_state)
-
-        # Filter by week if specified
-        if week is not None:
-            demo_games = [g for g in demo_games if g.week == week]
-
-        return {
-            "count": len(demo_games),
-            "games": demo_games,
-            "is_demo": True,
-            "is_initializing": False,
-            "retry_after_seconds": None,
-        }
 
     # COLD START: If still initializing and no data, tell frontend to retry
     if is_initializing and not app_state.last_value_bets:
@@ -488,114 +418,24 @@ async def get_game_detail(
     Get detailed information for a specific game.
 
     Returns the game with all associated value bets.
-
-    ROBUST FALLBACK LOGIC:
-    1. Check if we're in demo mode -> use mock data
-    2. Check if we're in fallback mode -> use fallback data directly (skip pipeline)
-    3. Try pipeline -> if fails, fall back to synthetic recovery
+    Uses ONLY REAL DATA from nflverse and The Odds API.
     """
     app_state = request.app.state.app_state
 
-    # Check demo mode first
-    is_demo = get_val(app_state, "_demo_mode", False)
-
-    if is_demo and app_state._mock_games:
-        print(f"DEBUG [DEMO MODE]: Looking for game_id='{game_id}' (Type: {type(game_id).__name__})")
-        # Find game in mock data using fuzzy matching
-        for game in app_state._mock_games:
-            mock_game_id = str(get_val(game, "game_id", ""))
-            print(f"DEBUG [DEMO MODE]: Comparing with mock game_id='{mock_game_id}' | Match: {_game_ids_match(mock_game_id, str(game_id))}")
-            if _game_ids_match(mock_game_id, str(game_id)):
-                # Get bets for this game using FUZZY matching
-                game_bets = [
-                    bet for bet in app_state.last_value_bets
-                    if _game_ids_match(str(get_val(bet, "game_id", "")), str(game_id))
-                ]
-                print(f"DEBUG [DEMO MODE]: Found {len(game_bets)} matching bets")
-
-                # Format bets with game_id included
-                formatted_bets = [_format_bet(bet, game_id) for bet in game_bets]
-                formatted_bets.sort(key=lambda b: b["edge"], reverse=True)
-
-                return {
-                    "game_id": game_id,
-                    "home_team": get_val(game, "home_team", ""),
-                    "away_team": get_val(game, "away_team", ""),
-                    "kickoff": get_val(game, "kickoff", ""),
-                    "week": get_val(game, "week", 1),
-                    "season": get_val(game, "season", 2024),
-                    "value_bets": formatted_bets,
-                    "value_bet_count": len(formatted_bets),
-                    "is_demo": True,
-                    "is_fallback": False,
-                }
-
-        return {"error": "Game not found", "game_id": game_id, "is_demo": True}
-
-    # =========================================================================
-    # ROBUST FALLBACK: Check if we're in fallback mode BEFORE querying pipeline
-    # This prevents 404 errors when the system is not fully initialized
-    # =========================================================================
+    # Check if system is initialized
     is_initialized = get_val(app_state, "_initialized", False)
-    using_fallback = get_val(app_state, "_using_fallback", False)
 
-    # Force fallback mode check by accessing last_value_bets (triggers _using_fallback flag)
-    _ = app_state.last_value_bets
-    using_fallback = get_val(app_state, "_using_fallback", False)
+    if not is_initialized:
+        logger.info(f"System not initialized - returning 503 for game {game_id}")
+        return {
+            "error": "System initializing",
+            "game_id": game_id,
+            "is_demo": False,
+            "is_initializing": True,
+            "retry_after_seconds": 5,
+        }
 
-    if not is_initialized or using_fallback:
-        print(f"DEBUG [FALLBACK MODE]: Serving game_id='{game_id}' (Type: {type(game_id).__name__})")
-        print(f"DEBUG [FALLBACK MODE]: initialized={is_initialized}, using_fallback={using_fallback}")
-        logger.info(f"🔄 FALLBACK MODE: Serving game {game_id} from fallback data (initialized={is_initialized}, using_fallback={using_fallback})")
-
-        # Get fallback games and bets directly - DO NOT query pipeline
-        fallback_games = app_state.get_fallback_games()
-        fallback_bets = app_state.get_fallback_data()
-
-        print(f"DEBUG [FALLBACK MODE]: {len(fallback_games)} fallback games, {len(fallback_bets)} fallback bets")
-
-        # Find the specific game using FUZZY matching with str() normalization
-        target_game = None
-        target_game_id = str(game_id)
-        for fg in fallback_games:
-            fg_game_id = str(get_val(fg, "game_id", ""))
-            print(f"DEBUG [FALLBACK MODE]: Comparing '{target_game_id}' with fallback '{fg_game_id}' | Match: {_game_ids_match(fg_game_id, target_game_id)}")
-            if _game_ids_match(fg_game_id, target_game_id):
-                target_game = fg
-                break
-
-        if target_game:
-            # Filter bets for this game using FUZZY matching with str() normalization
-            game_bets = []
-            for bet in fallback_bets:
-                bet_game_id = str(get_val(bet, "game_id", ""))
-                if _game_ids_match(bet_game_id, target_game_id):
-                    game_bets.append(bet)
-            print(f"DEBUG [FALLBACK MODE]: Found {len(game_bets)} matching bets")
-
-            # Format bets with game_id included
-            formatted_bets = [_format_bet(bet, game_id) for bet in game_bets]
-            formatted_bets.sort(key=lambda b: b["edge"], reverse=True)
-
-            return {
-                "game_id": game_id,
-                "home_team": get_val(target_game, "home_team", ""),
-                "away_team": get_val(target_game, "away_team", ""),
-                "kickoff": get_val(target_game, "kickoff", ""),
-                "week": get_val(target_game, "week", 17),
-                "season": get_val(target_game, "season", 2024),
-                "value_bets": formatted_bets,
-                "value_bet_count": len(formatted_bets),
-                "is_demo": False,
-                "is_fallback": True,
-            }
-        else:
-            # Game not in fallback data - try synthetic reconstruction
-            logger.warning(f"⚠️ Game {game_id} not in fallback games, attempting synthetic recovery")
-
-    # =========================================================================
-    # NORMAL MODE: Try to get game from pipeline
-    # =========================================================================
+    # Get game from pipeline (REAL DATA only)
     game_data = None
     if app_state.pipeline:
         try:
