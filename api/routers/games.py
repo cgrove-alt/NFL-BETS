@@ -43,6 +43,63 @@ class GamesListResponse(BaseModel):
     is_fallback: bool = False
 
 
+def _format_bet(bet, game_id_override: str = None) -> dict:
+    """
+    Format a bet object into a dictionary matching the ValueBet frontend interface.
+
+    Args:
+        bet: The bet object (can be ValueBet, FallbackValueBet, or similar)
+        game_id_override: Optional game_id to use instead of bet's game_id
+
+    Returns:
+        Dictionary with all ValueBet fields
+    """
+    # Get urgency value - handle enum or string
+    urgency_val = getattr(bet, "urgency", "medium")
+    if hasattr(urgency_val, "value"):
+        urgency_str = urgency_val.value
+    else:
+        urgency_str = str(urgency_val)
+
+    # Get detected_at - handle datetime or None
+    detected_at = getattr(bet, "detected_at", None)
+    if detected_at is not None:
+        if isinstance(detected_at, datetime):
+            detected_at_str = detected_at.isoformat()
+        else:
+            detected_at_str = str(detected_at)
+    else:
+        detected_at_str = datetime.now().isoformat()
+
+    # Get expires_at - handle datetime or None
+    expires_at = getattr(bet, "expires_at", None)
+    if expires_at is not None:
+        if isinstance(expires_at, datetime):
+            expires_at_str = expires_at.isoformat()
+        else:
+            expires_at_str = str(expires_at)
+    else:
+        expires_at_str = None
+
+    return {
+        "game_id": game_id_override or getattr(bet, "game_id", ""),
+        "bet_type": getattr(bet, "bet_type", ""),
+        "description": getattr(bet, "description", ""),
+        "model_probability": getattr(bet, "model_probability", 0),
+        "model_prediction": getattr(bet, "model_prediction", 0),
+        "bookmaker": getattr(bet, "bookmaker", ""),
+        "odds": getattr(bet, "odds", 0),
+        "implied_probability": getattr(bet, "implied_probability", 0),
+        "line": getattr(bet, "line", 0),
+        "edge": getattr(bet, "edge", 0),
+        "expected_value": getattr(bet, "expected_value", 0),
+        "recommended_stake": getattr(bet, "recommended_stake", None),
+        "urgency": urgency_str,
+        "detected_at": detected_at_str,
+        "expires_at": expires_at_str,
+    }
+
+
 def _build_demo_games(app_state) -> list[GameResponse]:
     """
     Build game responses from demo/mock data.
@@ -317,6 +374,11 @@ async def get_game_detail(
     Get detailed information for a specific game.
 
     Returns the game with all associated value bets.
+
+    ROBUST FALLBACK LOGIC:
+    1. Check if we're in demo mode -> use mock data
+    2. Check if we're in fallback mode -> use fallback data directly (skip pipeline)
+    3. Try pipeline -> if fails, fall back to synthetic recovery
     """
     app_state = request.app.state.app_state
 
@@ -333,23 +395,9 @@ async def get_game_detail(
                     if getattr(bet, "game_id", "") == game_id
                 ]
 
-                formatted_bets = []
-                for bet in game_bets:
-                    formatted_bets.append({
-                        "bet_type": getattr(bet, "bet_type", ""),
-                        "description": getattr(bet, "description", ""),
-                        "model_probability": getattr(bet, "model_probability", 0),
-                        "model_prediction": getattr(bet, "model_prediction", 0),
-                        "bookmaker": getattr(bet, "bookmaker", ""),
-                        "odds": getattr(bet, "odds", 0),
-                        "implied_probability": getattr(bet, "implied_probability", 0),
-                        "line": getattr(bet, "line", 0),
-                        "edge": getattr(bet, "edge", 0),
-                        "expected_value": getattr(bet, "expected_value", 0),
-                        "recommended_stake": getattr(bet, "recommended_stake", None),
-                        "urgency": getattr(bet, "urgency", "medium").value if hasattr(getattr(bet, "urgency", None), "value") else "medium",
-                        "detected_at": getattr(bet, "detected_at", datetime.now()).isoformat(),
-                    })
+                # Format bets with game_id included
+                formatted_bets = [_format_bet(bet, game_id) for bet in game_bets]
+                formatted_bets.sort(key=lambda b: b["edge"], reverse=True)
 
                 return {
                     "game_id": game_id,
@@ -361,11 +409,63 @@ async def get_game_detail(
                     "value_bets": formatted_bets,
                     "value_bet_count": len(formatted_bets),
                     "is_demo": True,
+                    "is_fallback": False,
                 }
 
         return {"error": "Game not found", "game_id": game_id, "is_demo": True}
 
-    # Find the game
+    # =========================================================================
+    # ROBUST FALLBACK: Check if we're in fallback mode BEFORE querying pipeline
+    # This prevents 404 errors when the system is not fully initialized
+    # =========================================================================
+    is_initialized = getattr(app_state, "_initialized", False)
+    using_fallback = getattr(app_state, "_using_fallback", False)
+
+    # Force fallback mode check by accessing last_value_bets (triggers _using_fallback flag)
+    _ = app_state.last_value_bets
+    using_fallback = getattr(app_state, "_using_fallback", False)
+
+    if not is_initialized or using_fallback:
+        logger.info(f"🔄 FALLBACK MODE: Serving game {game_id} from fallback data (initialized={is_initialized}, using_fallback={using_fallback})")
+
+        # Get fallback games and bets directly - DO NOT query pipeline
+        fallback_games = app_state.get_fallback_games()
+        fallback_bets = app_state.get_fallback_data()
+
+        # Find the specific game
+        target_game = None
+        for fg in fallback_games:
+            if fg.get("game_id") == game_id:
+                target_game = fg
+                break
+
+        if target_game:
+            # Filter bets for this game
+            game_bets = [bet for bet in fallback_bets if getattr(bet, "game_id", "") == game_id]
+
+            # Format bets with game_id included
+            formatted_bets = [_format_bet(bet, game_id) for bet in game_bets]
+            formatted_bets.sort(key=lambda b: b["edge"], reverse=True)
+
+            return {
+                "game_id": game_id,
+                "home_team": target_game.get("home_team", ""),
+                "away_team": target_game.get("away_team", ""),
+                "kickoff": target_game.get("kickoff", ""),
+                "week": target_game.get("week", 17),
+                "season": target_game.get("season", 2024),
+                "value_bets": formatted_bets,
+                "value_bet_count": len(formatted_bets),
+                "is_demo": False,
+                "is_fallback": True,
+            }
+        else:
+            # Game not in fallback data - try synthetic reconstruction
+            logger.warning(f"⚠️ Game {game_id} not in fallback games, attempting synthetic recovery")
+
+    # =========================================================================
+    # NORMAL MODE: Try to get game from pipeline
+    # =========================================================================
     game_data = None
     if app_state.pipeline:
         try:
@@ -378,17 +478,19 @@ async def get_game_detail(
                 if game.game_id == game_id:
                     game_data = game
                     break
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Pipeline query failed for game {game_id}: {e}")
 
     # Get value bets for this game
     value_bets = app_state.last_value_bets
     game_bets = [bet for bet in value_bets if getattr(bet, "game_id", "") == game_id]
 
+    # =========================================================================
     # FALLBACK RECOVERY: If pipeline failed, reconstruct game from bets or fallback data
+    # =========================================================================
     is_fallback = False
     if not game_data:
-        logger.warning(f"🔄 Pipeline failed for game {game_id} - attempting fallback recovery")
+        logger.warning(f"🔄 Pipeline returned no data for game {game_id} - attempting fallback recovery")
 
         # First, try to find game in fallback games
         fallback_games = app_state.get_fallback_games()
@@ -410,7 +512,6 @@ async def get_game_detail(
         # If still no game_data, try to reconstruct from bet metadata
         if not game_data and game_bets:
             logger.info(f"✅ Reconstructing game {game_id} from bet metadata")
-            sample_bet = game_bets[0]
 
             # Parse game_id format: "YYYY_WW_AWAY_HOME" (e.g., "2024_17_BAL_KC")
             parts = game_id.split("_")
@@ -427,6 +528,7 @@ async def get_game_detail(
                 away_team = "Unknown"
 
             # Try to extract kickoff from bet if available
+            sample_bet = game_bets[0]
             kickoff = getattr(sample_bet, "detected_at", datetime.now())
             if isinstance(kickoff, datetime):
                 kickoff = kickoff.isoformat()
@@ -444,28 +546,14 @@ async def get_game_detail(
         # If STILL no game_data, return error
         if not game_data:
             logger.error(f"❌ Could not recover game {game_id} - no fallback or bets available")
-            return {"error": "Game not found", "game_id": game_id}
+            return {"error": "Game not found", "game_id": game_id, "is_fallback": False}
 
-    # Format bets
-    formatted_bets = []
-    for bet in game_bets:
-        formatted_bets.append({
-            "bet_type": getattr(bet, "bet_type", ""),
-            "description": getattr(bet, "description", ""),
-            "model_probability": getattr(bet, "model_probability", 0),
-            "model_prediction": getattr(bet, "model_prediction", 0),
-            "bookmaker": getattr(bet, "bookmaker", ""),
-            "odds": getattr(bet, "odds", 0),
-            "implied_probability": getattr(bet, "implied_probability", 0),
-            "line": getattr(bet, "line", 0),
-            "edge": getattr(bet, "edge", 0),
-            "expected_value": getattr(bet, "expected_value", 0),
-            "recommended_stake": getattr(bet, "recommended_stake", None),
-            "urgency": getattr(bet, "urgency", "medium").value if hasattr(getattr(bet, "urgency", None), "value") else str(getattr(bet, "urgency", "medium")),
-            "detected_at": getattr(bet, "detected_at", datetime.now()).isoformat() if getattr(bet, "detected_at", None) else None,
-        })
+    # =========================================================================
+    # FORMAT RESPONSE
+    # =========================================================================
 
-    # Sort by edge descending
+    # Format bets with game_id included
+    formatted_bets = [_format_bet(bet, game_id) for bet in game_bets]
     formatted_bets.sort(key=lambda b: b["edge"], reverse=True)
 
     # Format kickoff
