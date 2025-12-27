@@ -119,10 +119,16 @@ async def run_calibration_analysis(
     )
 
     # Extract features and target
-    target_col = "target" if "target" in train_df.columns else "actual_spread"
+    if model_type in ["totals", "total"]:
+        target_col = "total_points"
+    elif "target" in train_df.columns:
+        target_col = "target"
+    else:
+        target_col = "actual_spread"
+
     feature_cols = [c for c in train_df.columns if c not in [
         target_col, "game_id", "season", "week", "home_team", "away_team",
-        "actual_spread", "spread_line", "season_week_index"
+        "actual_spread", "spread_line", "season_week_index", "total_points"
     ]]
 
     X_train = train_df.select(feature_cols)
@@ -345,10 +351,16 @@ async def run_feature_analysis(
         return {"error": "No data"}
 
     # Extract features and target
-    target_col = "actual_spread" if "actual_spread" in df.columns else "target"
+    if model_type in ["totals", "total"]:
+        target_col = "total_points"
+    elif "actual_spread" in df.columns:
+        target_col = "actual_spread"
+    else:
+        target_col = "target"
+
     feature_names = [c for c in df.columns if c not in [
         target_col, "game_id", "season", "week", "home_team", "away_team",
-        "spread_line", "season_week_index"
+        "spread_line", "season_week_index", "total_points", "actual_spread"
     ]]
     X_array = df.select(feature_names).to_numpy()
     y_array = df[target_col].to_numpy()

@@ -327,10 +327,16 @@ class SeasonalBacktester:
                 )
 
             # Extract features and target
-            target_col = "target" if "target" in train_df.columns else "actual_spread"
+            if model_type in ["totals", "total"]:
+                target_col = "total_points"
+            elif "target" in train_df.columns:
+                target_col = "target"
+            else:
+                target_col = "actual_spread"
+
             feature_cols = [c for c in train_df.columns if c not in [
                 target_col, "game_id", "season", "week", "home_team", "away_team",
-                "actual_spread", "spread_line", "season_week_index"
+                "actual_spread", "spread_line", "season_week_index", "total_points"
             ]]
 
             X_train = train_df.select(feature_cols)

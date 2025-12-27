@@ -668,7 +668,7 @@ class FeaturePipeline:
             return await self._build_spread_training_data(
                 pbp_df, schedules_df, seasons, include_playoffs
             )
-        elif target == "total":
+        elif target in ["total", "totals"]:
             return await self._build_totals_training_data(
                 pbp_df, schedules_df, seasons, include_playoffs
             )

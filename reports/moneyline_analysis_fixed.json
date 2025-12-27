@@ -1,0 +1,169 @@
+{
+  "model_type": "moneyline",
+  "seasons": [
+    2021,
+    2022,
+    2023,
+    2024,
+    2025
+  ],
+  "analysis_date": "2025-12-27T11:39:53.844823",
+  "backtest": {
+    "model_type": "moneyline",
+    "overall_roi": 0.7743315508021391,
+    "overall_win_rate": 0.9294117647058824,
+    "total_bets": 425,
+    "season_trend": 0.05745420624151959,
+    "by_season": [
+      {
+        "season": 2024,
+        "roi": 0.7471590909090909,
+        "win_rate": 0.9151785714285714,
+        "n_bets": 224
+      },
+      {
+        "season": 2025,
+        "roi": 0.8046132971506106,
+        "win_rate": 0.945273631840796,
+        "n_bets": 201
+      }
+    ]
+  },
+  "calibration": {
+    "error": "name 'pl' is not defined"
+  },
+  "edge_validation": {
+    "model_type": "moneyline",
+    "optimal_min_edge": 0.04,
+    "edge_buckets": [
+      {
+        "min": 0.01,
+        "max": 0.02,
+        "n_bets": 233,
+        "win_rate": 0.5622317596566524,
+        "roi": 0.0733515411627,
+        "is_significant": "False"
+      },
+      {
+        "min": 0.02,
+        "max": 0.03,
+        "n_bets": 78,
+        "win_rate": 0.5,
+        "roi": -0.04545454545454545,
+        "is_significant": "False"
+      },
+      {
+        "min": 0.03,
+        "max": 0.04,
+        "n_bets": 54,
+        "win_rate": 0.5740740740740741,
+        "roi": 0.09595959595959593,
+        "is_significant": "False"
+      },
+      {
+        "min": 0.04,
+        "max": 0.05,
+        "n_bets": 38,
+        "win_rate": 0.6578947368421053,
+        "roi": 0.2559808612440191,
+        "is_significant": "False"
+      },
+      {
+        "min": 0.05,
+        "max": 0.07,
+        "n_bets": 45,
+        "win_rate": 0.5111111111111111,
+        "roi": -0.024242424242424225,
+        "is_significant": "False"
+      },
+      {
+        "min": 0.07,
+        "max": 0.1,
+        "n_bets": 34,
+        "win_rate": 0.6764705882352942,
+        "roi": 0.2914438502673797,
+        "is_significant": "False"
+      }
+    ],
+    "edges_are_real": "False",
+    "p_value": 0.2916
+  },
+  "model_comparison": {
+    "model_type": "moneyline",
+    "beats_vegas": "False",
+    "model_mae": 10.019262852106454,
+    "vegas_mae": 1.5454383134961975,
+    "mae_improvement": -8.473824538610257,
+    "model_ats_rate": 0.4581497797356828,
+    "model_roi": -0.12535042050460551,
+    "p_value": 0.907880623713117
+  },
+  "feature_analysis": {
+    "model_type": "moneyline",
+    "n_features": 375,
+    "n_stable_features": 45,
+    "concentration": 0.525159387736162,
+    "top_features": [
+      {
+        "name": "opening_spread",
+        "importance": 12.46658341551838,
+        "rank": 1,
+        "is_stable": true
+      },
+      {
+        "name": "home_implied_score",
+        "importance": 5.6743980202081055,
+        "rank": 2,
+        "is_stable": false
+      },
+      {
+        "name": "away_implied_score",
+        "importance": 4.34372282911693,
+        "rank": 3,
+        "is_stable": true
+      },
+      {
+        "name": "away_sack_rate_3g",
+        "importance": 3.362287867200383,
+        "rank": 4,
+        "is_stable": false
+      },
+      {
+        "name": "home_epa_volatility_5g",
+        "importance": 2.522195950391743,
+        "rank": 5,
+        "is_stable": false
+      },
+      {
+        "name": "diff_sack_rate_10g",
+        "importance": 2.0325831503547023,
+        "rank": 6,
+        "is_stable": true
+      },
+      {
+        "name": "away_cpoe_3g",
+        "importance": 2.0324776402161238,
+        "rank": 7,
+        "is_stable": false
+      },
+      {
+        "name": "home_epa_allowed_per_rush_5g",
+        "importance": 2.032336583917854,
+        "rank": 8,
+        "is_stable": false
+      },
+      {
+        "name": "home_epa_allowed_per_rush_3g",
+        "importance": 2.0316588975885415,
+        "rank": 9,
+        "is_stable": true
+      },
+      {
+        "name": "home_epa_volatility_3g",
+        "importance": 1.9636810259951503,
+        "rank": 10,
+        "is_stable": false
+      }
+    ]
+  }
+}
