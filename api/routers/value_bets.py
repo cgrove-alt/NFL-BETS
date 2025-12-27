@@ -166,7 +166,7 @@ async def debug_value_detection(request: Request) -> dict[str, Any]:
     logger = logging.getLogger(__name__)
 
     debug_info = {
-        "code_version": "v9-full-scan-test",  # Test full scan_spreads flow
+        "code_version": "v10-evaluate-test",  # Test _evaluate_spread_bet directly
         "pipeline_initialized": app_state.pipeline is not None,
         "feature_pipeline_initialized": app_state.feature_pipeline is not None,
         "value_detector_initialized": app_state.value_detector is not None,
@@ -369,6 +369,9 @@ async def debug_value_detection(request: Request) -> dict[str, Any]:
                                     # Build features dict for the test game
                                     test_features_dict = {test_game_id: test_features.features}
 
+                                    # Check if odds exist for test game
+                                    matching_odds = [o for o in transformed if o.get("game_id") == test_game_id]
+
                                     # Run actual scan_spreads
                                     scan_result = app_state.value_detector.scan_spreads(
                                         games=[test_game],
@@ -377,6 +380,9 @@ async def debug_value_detection(request: Request) -> dict[str, Any]:
                                     )
 
                                     debug_info["scan_test"] = {
+                                        "test_game_id": test_game_id,
+                                        "odds_for_game": len(matching_odds),
+                                        "sample_matching_odds": matching_odds[0] if matching_odds else None,
                                         "games_scanned": scan_result.games_scanned,
                                         "value_bets_found": len(scan_result.value_bets),
                                         "bets": [
@@ -389,6 +395,21 @@ async def debug_value_detection(request: Request) -> dict[str, Any]:
                                             for b in scan_result.value_bets[:3]
                                         ]
                                     }
+
+                                    # Also test manually calling _evaluate_spread_bet
+                                    if matching_odds and test_pred:
+                                        from nfl_bets.betting.value_detector import BetType
+                                        home_bet = app_state.value_detector._evaluate_spread_bet(
+                                            prediction=test_pred,
+                                            game=test_game,
+                                            odds=matching_odds[0],
+                                            side="home",
+                                        )
+                                        debug_info["evaluate_test"] = {
+                                            "home_bet_created": home_bet is not None,
+                                            "home_edge": round(home_bet.edge, 4) if home_bet else None,
+                                            "home_ev": round(home_bet.expected_value, 4) if home_bet else None,
+                                        }
                             else:
                                 debug_info["feature_test"]["status"] = "failed"
                                 debug_info["feature_test"]["error"] = "build_spread_features returned None"
