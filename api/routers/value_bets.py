@@ -166,7 +166,7 @@ async def debug_value_detection(request: Request) -> dict[str, Any]:
     logger = logging.getLogger(__name__)
 
     debug_info = {
-        "code_version": "v4-low-thresholds",  # Update this to verify deployment
+        "code_version": "v5-feature-fix",  # Update this to verify deployment
         "pipeline_initialized": app_state.pipeline is not None,
         "feature_pipeline_initialized": app_state.feature_pipeline is not None,
         "value_detector_initialized": app_state.value_detector is not None,
@@ -261,6 +261,69 @@ async def debug_value_detection(request: Request) -> dict[str, Any]:
 
                     # Limit mismatches shown
                     debug_info["team_name_mismatches"] = debug_info["team_name_mismatches"][:5]
+
+                # TEST: Try to build features for one game to see if it works
+                if games and app_state.feature_pipeline:
+                    test_game = games[0]
+                    test_game_id = test_game.get("game_id")
+                    test_season = test_game.get("season", 2025)
+                    test_week = test_game.get("week", 17)
+
+                    debug_info["feature_test"] = {
+                        "game_id": test_game_id,
+                        "season": test_season,
+                        "week": test_week,
+                        "status": "pending",
+                        "error": None,
+                    }
+
+                    try:
+                        # Try to fetch PBP data
+                        import polars as pl
+                        pbp_df = None
+                        for season_try in [test_season, test_season - 1, 2024]:
+                            pbp_df = await app_state.pipeline.get_historical_pbp([season_try])
+                            if pbp_df is not None and len(pbp_df) > 0:
+                                debug_info["feature_test"]["pbp_season"] = season_try
+                                debug_info["feature_test"]["pbp_rows"] = len(pbp_df)
+                                break
+
+                        if pbp_df is None or len(pbp_df) == 0:
+                            debug_info["feature_test"]["status"] = "failed"
+                            debug_info["feature_test"]["error"] = "No PBP data available for any season"
+                        else:
+                            # Try to fetch schedules
+                            schedules_df = await app_state.pipeline.get_schedules([debug_info["feature_test"]["pbp_season"]])
+                            if schedules_df is None:
+                                schedules_df = pl.DataFrame(games)
+                                debug_info["feature_test"]["schedules_source"] = "games_fallback"
+                            else:
+                                debug_info["feature_test"]["schedules_source"] = "nflverse"
+                                debug_info["feature_test"]["schedules_rows"] = len(schedules_df)
+
+                            # Try to build features
+                            test_features = await app_state.feature_pipeline.build_spread_features(
+                                game_id=test_game_id,
+                                home_team=test_game.get("home_team"),
+                                away_team=test_game.get("away_team"),
+                                season=debug_info["feature_test"]["pbp_season"],
+                                week=int(test_week),
+                                pbp_df=pbp_df,
+                                schedules_df=schedules_df,
+                            )
+
+                            if test_features and hasattr(test_features, 'features'):
+                                debug_info["feature_test"]["status"] = "success"
+                                debug_info["feature_test"]["feature_count"] = len(test_features.features)
+                                debug_info["features_built"] = 1  # At least one works
+                            else:
+                                debug_info["feature_test"]["status"] = "failed"
+                                debug_info["feature_test"]["error"] = "build_spread_features returned None"
+                    except Exception as e:
+                        import traceback
+                        debug_info["feature_test"]["status"] = "failed"
+                        debug_info["feature_test"]["error"] = f"{type(e).__name__}: {str(e)}"
+                        debug_info["feature_test"]["traceback"] = traceback.format_exc()
 
         # Get current value bets in memory
         debug_info["value_bets_in_memory"] = len(app_state.last_value_bets)

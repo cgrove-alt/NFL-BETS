@@ -253,22 +253,42 @@ async def poll_odds(
             return []
 
         # 3. Build features for each game
-        # Create schedules DataFrame from games data (for game context features)
-        # This ensures we have the current season's schedule info even when using
-        # historical PBP data for team performance metrics
-        schedules_df = pl.DataFrame(games)
-
         # Use the season from game data - nflverse labels by season start year
-        # (e.g., 2025-2026 season = season 2025)
         sample_season = games[0].get("season") if games else None
         pbp_season = int(sample_season) if sample_season else 2025
 
-        # Fetch PBP data once for all games
-        logger.info(f"Fetching PBP data for season {pbp_season}")
-        pbp_df = await pipeline.get_historical_pbp([pbp_season])
+        # Fetch PBP data with fallback to previous seasons
+        pbp_df = None
+        seasons_to_try = [pbp_season, pbp_season - 1, 2024, 2023]  # Try multiple seasons
+        for season_try in seasons_to_try:
+            try:
+                logger.info(f"Trying to fetch PBP data for season {season_try}")
+                pbp_df = await pipeline.get_historical_pbp([season_try])
+                if pbp_df is not None and len(pbp_df) > 0:
+                    logger.info(f"Successfully loaded PBP data from season {season_try} ({len(pbp_df)} rows)")
+                    pbp_season = season_try  # Update to actual season used
+                    break
+                else:
+                    logger.warning(f"No PBP data for season {season_try}, trying next...")
+            except Exception as e:
+                logger.warning(f"PBP fetch failed for season {season_try}: {e}")
+
         if pbp_df is None or len(pbp_df) == 0:
-            logger.warning(f"No PBP data available for season {pbp_season}")
+            logger.error(f"CRITICAL: No PBP data available for any season {seasons_to_try}")
             return []
+
+        # Fetch real schedules from nflverse (not just games list)
+        logger.info(f"Fetching schedules for season {pbp_season}")
+        try:
+            schedules_df = await pipeline.get_schedules([pbp_season])
+            if schedules_df is None or len(schedules_df) == 0:
+                logger.warning(f"No schedules from nflverse, using games list as fallback")
+                schedules_df = pl.DataFrame(games)
+            else:
+                logger.info(f"Loaded {len(schedules_df)} schedule entries from nflverse")
+        except Exception as e:
+            logger.warning(f"Schedules fetch failed: {e}, using games list as fallback")
+            schedules_df = pl.DataFrame(games)
 
         features = {}
         feature_errors = []
@@ -296,9 +316,17 @@ async def poll_odds(
                     schedules_df=schedules_df,  # Pass current season's schedule
                 )
                 # Extract the features dict from SpreadPredictionFeatures object
-                features[game_id] = game_features.features
+                if game_features and hasattr(game_features, 'features'):
+                    features[game_id] = game_features.features
+                    logger.debug(f"Built features for {game_id}: {len(game_features.features)} features")
+                else:
+                    feature_errors.append(f"{game_id}: build_spread_features returned None or no features")
             except Exception as e:
-                feature_errors.append(f"{game_id}: {str(e)[:50]}")
+                import traceback
+                error_msg = f"{game_id}: {type(e).__name__}: {str(e)}"
+                feature_errors.append(error_msg)
+                logger.error(f"Feature build failed: {error_msg}")
+                logger.debug(traceback.format_exc())
 
         logger.info(f"Step 4: Built features for {len(features)}/{len(games)} games")
         if feature_errors and len(feature_errors) <= 5:
