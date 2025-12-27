@@ -128,7 +128,9 @@ class FeaturePipeline:
     """
 
     # Spread model feature names (ordered)
+    # Total: ~50 features for comprehensive game prediction
     SPREAD_FEATURE_NAMES = [
+        # === CORE OFFENSIVE EPA (14) ===
         # Home team offensive features
         "home_epa_per_play_5g",
         "home_epa_per_pass_5g",
@@ -145,26 +147,64 @@ class FeaturePipeline:
         "away_cpoe_5g",
         "away_red_zone_td_rate_5g",
         "away_third_down_conv_rate_5g",
+
+        # === CORE DEFENSIVE EPA (4) ===
         # Home team defensive features
         "home_epa_allowed_per_play_5g",
         "home_defensive_success_rate_5g",
         # Away team defensive features
         "away_epa_allowed_per_play_5g",
         "away_defensive_success_rate_5g",
-        # Game context features
+
+        # === GAME CONTEXT (4) ===
         "rest_advantage",
         "travel_advantage",
         "is_divisional",
         "is_outdoor",
-        # Injury features
+
+        # === INJURY FEATURES (5) ===
         "health_advantage",
         "home_offense_health",
         "away_offense_health",
         "home_defense_health",
         "away_defense_health",
-        # Vegas features
+
+        # === VEGAS FEATURES (2) ===
         "implied_total",
         "opening_spread",
+
+        # === NEW: OPPONENT-ADJUSTED EPA (3) ===
+        # SOS-adjusted efficiency metrics
+        "home_adj_epa_per_play_5g",
+        "away_adj_epa_per_play_5g",
+        "adj_epa_advantage",
+
+        # === NEW: PACE FEATURES (3) ===
+        # Tempo and play volume
+        "home_plays_per_game_5g",
+        "away_plays_per_game_5g",
+        "pace_differential",
+
+        # === NEW: CLEAN EPA (garbage-time filtered) (4) ===
+        # More predictive for close games
+        "home_epa_per_play_clean_5g",
+        "away_epa_per_play_clean_5g",
+        "home_epa_per_pass_clean_5g",
+        "away_epa_per_pass_clean_5g",
+
+        # === NEW: VOLATILITY/CONSISTENCY (4) ===
+        # High volatility = less predictable
+        "home_epa_volatility_5g",
+        "away_epa_volatility_5g",
+        "home_yards_volatility_5g",
+        "away_yards_volatility_5g",
+
+        # === NEW: ADVANCED PASSING (4) ===
+        # Air yards, pressure, and mistakes
+        "home_air_yards_per_attempt_5g",
+        "away_air_yards_per_attempt_5g",
+        "home_sack_rate_5g",
+        "away_sack_rate_5g",
     ]
 
     # Player prop feature names (ordered)
@@ -714,6 +754,9 @@ class FeaturePipeline:
         if not include_playoffs:
             completed_games = completed_games.filter(pl.col("game_type") == "REG")
 
+        # CRITICAL: Sort chronologically to prevent look-ahead bias
+        completed_games = completed_games.sort("season", "week", "game_id")
+
         total_games = len(completed_games)
         self.logger.info(f"Processing {total_games} games for training")
 
@@ -758,6 +801,13 @@ class FeaturePipeline:
                 self.logger.warning(f"Failed to process {row['game_id']}: {e}")
 
         df = pl.DataFrame(results) if results else pl.DataFrame()
+
+        # Add season_week_index for consistent ordering in downstream splits
+        if len(df) > 0:
+            df = df.with_columns([
+                (pl.col("season") * 100 + pl.col("week")).alias("season_week_index")
+            ]).sort("season_week_index", "game_id")
+
         self.logger.info(f"Built training dataset: {len(df)} rows")
         return df
 
@@ -784,6 +834,9 @@ class FeaturePipeline:
 
         if not include_playoffs:
             completed_games = completed_games.filter(pl.col("game_type") == "REG")
+
+        # CRITICAL: Sort chronologically to prevent look-ahead bias
+        completed_games = completed_games.sort("season", "week", "game_id")
 
         total_games = len(completed_games)
         self.logger.info(f"Processing {total_games} games for totals training")
@@ -827,6 +880,13 @@ class FeaturePipeline:
                 self.logger.warning(f"Failed to process {row['game_id']}: {e}")
 
         df = pl.DataFrame(results) if results else pl.DataFrame()
+
+        # Add season_week_index for consistent ordering in downstream splits
+        if len(df) > 0:
+            df = df.with_columns([
+                (pl.col("season") * 100 + pl.col("week")).alias("season_week_index")
+            ]).sort("season_week_index", "game_id")
+
         self.logger.info(f"Built totals training dataset: {len(df)} rows")
         return df
 
@@ -891,6 +951,9 @@ class FeaturePipeline:
             self.logger.warning(f"No player-game data found for {prop_type}")
             return pl.DataFrame()
 
+        # CRITICAL: Sort chronologically to prevent look-ahead bias
+        player_games = player_games.sort("season", "week", "game_id", "player_id")
+
         self.logger.info(f"Found {len(player_games)} player-games for {prop_type}")
 
         # Build features for each player-game
@@ -930,6 +993,13 @@ class FeaturePipeline:
                 self.logger.warning(f"Failed to process {row['player_id']} {row['game_id']}: {e}")
 
         df = pl.DataFrame(results) if results else pl.DataFrame()
+
+        # Add season_week_index for consistent ordering in downstream splits
+        if len(df) > 0:
+            df = df.with_columns([
+                (pl.col("season") * 100 + pl.col("week")).alias("season_week_index")
+            ]).sort("season_week_index", "game_id", "player_id")
+
         self.logger.info(f"Built prop training dataset: {len(df)} rows")
         return df
 

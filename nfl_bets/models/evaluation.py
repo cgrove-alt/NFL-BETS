@@ -593,6 +593,39 @@ def log_loss(
     )
 
 
+def max_calibration_error(
+    predicted_probs: np.ndarray,
+    actual_outcomes: np.ndarray,
+    n_bins: int = 10,
+) -> float:
+    """
+    Calculate Maximum Calibration Error (MCE).
+
+    MCE is the maximum absolute difference between predicted probability
+    and actual frequency across all bins. Useful for identifying the
+    worst-case calibration error.
+
+    Args:
+        predicted_probs: Predicted probabilities
+        actual_outcomes: Binary actual outcomes
+        n_bins: Number of bins
+
+    Returns:
+        MCE value (0 = perfectly calibrated in all bins)
+    """
+    mean_predicted, mean_actual, counts = calculate_calibration_curve(
+        predicted_probs, actual_outcomes, n_bins
+    )
+
+    # MCE = max of |predicted - actual| across non-empty bins
+    mask = counts > 0
+    if not np.any(mask):
+        return 0.0
+
+    errors = np.abs(mean_predicted - mean_actual)
+    return float(np.max(errors[mask]))
+
+
 def binomial_test(
     wins: int,
     total: int,

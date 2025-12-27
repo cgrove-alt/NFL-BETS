@@ -232,6 +232,7 @@ class MoneylineModel(BaseModel):
         validation_data: Optional[tuple] = None,
         early_stopping_rounds: int = 50,
         fit_calibrator: bool = True,
+        season_week_index: Optional[np.ndarray] = None,
     ) -> "MoneylineModel":
         """
         Train the ensemble model.
@@ -242,6 +243,7 @@ class MoneylineModel(BaseModel):
             validation_data: Optional (X_val, y_val) for early stopping
             early_stopping_rounds: Rounds for early stopping
             fit_calibrator: Whether to fit probability calibrator
+            season_week_index: Optional temporal index for chronological sorting
 
         Returns:
             Self for method chaining
@@ -251,12 +253,32 @@ class MoneylineModel(BaseModel):
 
         self.logger.info(f"Training moneyline model on {len(y_arr)} samples")
 
-        # Split for validation if not provided
+        # Sort chronologically if index provided
+        if season_week_index is not None:
+            sort_idx = np.argsort(season_week_index)
+            X_arr = X_arr[sort_idx]
+            y_arr = y_arr[sort_idx]
+            self.logger.debug("Data sorted chronologically by season_week_index")
+
+        # CRITICAL: Use chronological split (no shuffling) to prevent look-ahead bias
+        # Split: 70% train, 15% validation, 15% calibration
         if validation_data is None:
-            X_train, X_val, y_train, y_val = train_test_split(
-                X_arr, y_arr, test_size=0.2, random_state=42, stratify=y_arr
+            n_samples = len(y_arr)
+            train_end = int(n_samples * 0.70)
+            val_end = int(n_samples * 0.85)
+
+            X_train = X_arr[:train_end]
+            y_train = y_arr[:train_end]
+            X_val = X_arr[train_end:val_end]
+            y_val = y_arr[train_end:val_end]
+            X_cal = X_arr[val_end:]
+            y_cal = y_arr[val_end:]
+
+            self.logger.info(
+                f"Chronological split: train={len(y_train)}, val={len(y_val)}, cal={len(y_cal)}"
             )
         else:
+            # External validation data provided - use it
             X_train, y_train = X_arr, y_arr
             X_val = self._prepare_features(validation_data[0])
             y_val = (
@@ -264,6 +286,8 @@ class MoneylineModel(BaseModel):
                 if isinstance(validation_data[1], pl.Series)
                 else np.asarray(validation_data[1])
             )
+            # Use validation data for calibration too (backward compat)
+            X_cal, y_cal = X_val, y_val
 
         # Train XGBoost
         if HAS_XGB and self.weights.get("xgb", 0) > 0:
@@ -290,17 +314,41 @@ class MoneylineModel(BaseModel):
         if total > 0:
             self.weights = {k: v / total for k, v in self.weights.items()}
 
-        # Fit calibrator if requested
+        # Fit calibrator on CALIBRATION SET (not validation) to prevent leakage
         if fit_calibrator and self.use_calibration:
-            self._fit_calibrator(X_val, y_val)
+            self._fit_calibrator(X_cal, y_cal)
 
         self.is_fitted = True
 
         # Calculate validation metrics
         val_probs = self._ensemble_predict_proba(X_val)
-        val_preds = (val_probs >= 0.5).astype(int)
+        if self.calibrator is not None:
+            val_probs_calibrated = self.calibrator.calibrate(val_probs)
+        else:
+            val_probs_calibrated = val_probs
+        val_preds = (val_probs_calibrated >= 0.5).astype(int)
         accuracy = np.mean(val_preds == y_val)
         self.logger.info(f"Validation accuracy: {accuracy:.1%}")
+
+        # Compute calibration metrics
+        from .evaluation import (
+            log_loss as compute_log_loss,
+            brier_score as compute_brier_score,
+            expected_calibration_error,
+        )
+
+        # Use calibrated probabilities for metrics
+        val_log_loss = compute_log_loss(y_val, val_probs_calibrated)
+        val_brier = compute_brier_score(y_val, val_probs_calibrated)
+        val_ece = expected_calibration_error(y_val, val_probs_calibrated)
+
+        # Compute MCE (Maximum Calibration Error)
+        val_mce = self._compute_mce(y_val, val_probs_calibrated)
+
+        self.logger.info(
+            f"Calibration: log_loss={val_log_loss:.4f}, brier={val_brier:.4f}, "
+            f"ece={val_ece:.4f}, mce={val_mce:.4f}"
+        )
 
         # Create metadata
         self.metadata = ModelMetadata(
@@ -321,6 +369,11 @@ class MoneylineModel(BaseModel):
                 rmse=0.0,
                 r2=0.0,
                 accuracy=float(np.mean(val_preds == y_val)),
+                brier_score=val_brier,
+                calibration_error=val_ece,
+                log_loss=val_log_loss,
+                ece=val_ece,
+                mce=val_mce,
                 ats_wins=int(np.sum(val_preds == y_val)),
                 ats_losses=len(y_val) - int(np.sum(val_preds == y_val)),
                 ats_pushes=0,
@@ -331,6 +384,26 @@ class MoneylineModel(BaseModel):
 
         self.logger.info("Moneyline model training complete")
         return self
+
+    def _compute_mce(
+        self,
+        y_true: np.ndarray,
+        y_prob: np.ndarray,
+        n_bins: int = 10,
+    ) -> float:
+        """Compute Maximum Calibration Error (MCE)."""
+        bins = np.linspace(0, 1, n_bins + 1)
+        max_error = 0.0
+
+        for i in range(n_bins):
+            mask = (y_prob >= bins[i]) & (y_prob < bins[i + 1])
+            if np.sum(mask) > 0:
+                bin_acc = np.mean(y_true[mask])
+                bin_conf = np.mean(y_prob[mask])
+                error = abs(bin_acc - bin_conf)
+                max_error = max(max_error, error)
+
+        return max_error
 
     def _train_xgb(
         self,

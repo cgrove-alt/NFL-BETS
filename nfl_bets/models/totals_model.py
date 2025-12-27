@@ -234,6 +234,7 @@ class TotalsModel(BaseModel):
         y: Union[pl.Series, np.ndarray],
         validation_data: Optional[tuple] = None,
         fit_calibrator: bool = True,
+        season_week_index: Optional[np.ndarray] = None,
     ) -> "TotalsModel":
         """
         Train quantile models for all target quantiles.
@@ -243,6 +244,7 @@ class TotalsModel(BaseModel):
             y: Target values (total points = home_score + away_score)
             validation_data: Optional (X_val, y_val) for calibration
             fit_calibrator: Whether to fit probability calibrator
+            season_week_index: Optional temporal index for chronological sorting
 
         Returns:
             Self for method chaining
@@ -252,12 +254,32 @@ class TotalsModel(BaseModel):
 
         self.logger.info(f"Training totals model on {len(y_arr)} samples")
 
-        # Split for validation if not provided
+        # Sort chronologically if index provided
+        if season_week_index is not None:
+            sort_idx = np.argsort(season_week_index)
+            X_arr = X_arr[sort_idx]
+            y_arr = y_arr[sort_idx]
+            self.logger.debug("Data sorted chronologically by season_week_index")
+
+        # CRITICAL: Use chronological split (no shuffling) to prevent look-ahead bias
+        # Split: 70% train, 15% validation, 15% calibration
         if validation_data is None:
-            X_train, X_val, y_train, y_val = train_test_split(
-                X_arr, y_arr, test_size=0.2, random_state=42
+            n_samples = len(y_arr)
+            train_end = int(n_samples * 0.70)
+            val_end = int(n_samples * 0.85)
+
+            X_train = X_arr[:train_end]
+            y_train = y_arr[:train_end]
+            X_val = X_arr[train_end:val_end]
+            y_val = y_arr[train_end:val_end]
+            X_cal = X_arr[val_end:]
+            y_cal = y_arr[val_end:]
+
+            self.logger.info(
+                f"Chronological split: train={len(y_train)}, val={len(y_val)}, cal={len(y_cal)}"
             )
         else:
+            # External validation data provided - use it
             X_train, y_train = X_arr, y_arr
             X_val = self._prepare_features(validation_data[0])
             y_val = (
@@ -265,6 +287,8 @@ class TotalsModel(BaseModel):
                 if isinstance(validation_data[1], pl.Series)
                 else np.asarray(validation_data[1])
             )
+            # Use validation data for calibration too (backward compat)
+            X_cal, y_cal = X_val, y_val
 
         # Train quantile models
         for q in self.quantiles:
@@ -276,9 +300,9 @@ class TotalsModel(BaseModel):
         self._residual_std = float(np.std(residuals))
         self.logger.info(f"Residual std: {self._residual_std:.2f} points")
 
-        # Fit calibrator if requested
+        # Fit calibrator on CALIBRATION SET (not validation) to prevent leakage
         if fit_calibrator and self.use_calibration:
-            self._fit_calibrator(X_val, y_val)
+            self._fit_calibrator(X_cal, y_cal)
 
         self.is_fitted = True
 

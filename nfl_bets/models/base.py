@@ -36,9 +36,14 @@ class ModelMetrics:
     recall: float = 0.0
     f1: float = 0.0
 
-    # Calibration metrics
+    # Calibration metrics (basic)
     calibration_error: float = 0.0
     brier_score: float = 0.0
+
+    # Calibration metrics (detailed)
+    log_loss: Optional[float] = None  # Cross-entropy loss
+    ece: Optional[float] = None  # Expected Calibration Error
+    mce: Optional[float] = None  # Maximum Calibration Error
 
     # Betting-specific metrics
     ats_wins: int = 0
@@ -85,6 +90,9 @@ class ModelMetrics:
             "accuracy": self.accuracy,
             "calibration_error": self.calibration_error,
             "brier_score": self.brier_score,
+            "log_loss": self.log_loss,
+            "ece": self.ece,
+            "mce": self.mce,
             "ats_record": self.ats_record,
             "ats_win_rate": self.ats_win_rate,
             "ats_roi": self.ats_roi,

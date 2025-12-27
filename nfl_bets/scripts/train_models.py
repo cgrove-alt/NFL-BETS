@@ -36,6 +36,140 @@ logger = logging.getLogger(__name__)
 MODEL_OUTPUT_DIR = Path("models/trained")
 DEFAULT_NUM_SEASONS = 5  # Train on 5 seasons of data
 
+# Walk-forward validation settings
+WALKFORWARD_ENABLED = True
+WALKFORWARD_TRAIN_SEASONS = 3
+WALKFORWARD_TEST_SEASONS = 1
+
+
+def run_walkforward_validation(
+    model_class,
+    X: pl.DataFrame,
+    y: pl.Series,
+    model_name: str,
+    season_week_index: Optional[pl.Series] = None,
+) -> None:
+    """
+    Run walk-forward validation and log summary stats.
+
+    Uses proper time-series cross-validation to ensure no look-ahead bias.
+
+    Args:
+        model_class: Model class to instantiate and train
+        X: Feature matrix
+        y: Target values
+        model_name: Name for logging
+        season_week_index: Optional temporal index for ordering
+    """
+    if not WALKFORWARD_ENABLED:
+        logger.info(f"Walk-forward validation disabled, skipping for {model_name}")
+        return
+
+    try:
+        from nfl_bets.models.evaluation import WalkForwardValidator
+        import numpy as np
+
+        logger.info(f"Running walk-forward validation for {model_name}...")
+
+        # Convert to numpy
+        X_arr = X.to_numpy()
+        y_arr = y.to_numpy()
+
+        # Get season info for splits
+        if season_week_index is not None:
+            swi = season_week_index.to_numpy()
+            # Sort by temporal index
+            sort_idx = np.argsort(swi)
+            X_arr = X_arr[sort_idx]
+            y_arr = y_arr[sort_idx]
+            swi = swi[sort_idx]
+
+            # Extract unique seasons from season_week_index (first 4 digits)
+            seasons = np.unique(swi // 100).astype(int)
+        else:
+            # Assume data is already sorted
+            # Create pseudo-seasons based on data chunks
+            n_samples = len(y_arr)
+            n_folds = 4
+            fold_size = n_samples // n_folds
+            seasons = list(range(n_folds))
+
+        if len(seasons) < 3:
+            logger.warning(f"Not enough seasons for walk-forward ({len(seasons)}), skipping")
+            return
+
+        # Run walk-forward validation
+        validator = WalkForwardValidator(
+            train_seasons=WALKFORWARD_TRAIN_SEASONS,
+            test_seasons=WALKFORWARD_TEST_SEASONS,
+            min_train_seasons=2,
+            expanding=True,
+        )
+
+        # Get fold splits
+        splits = validator.get_fold_splits(list(seasons))
+
+        logger.info(f"Walk-forward folds: {len(splits)}")
+
+        # Track metrics across folds
+        mae_scores = []
+        ats_records = []
+
+        for fold_id, (train_seasons, test_seasons) in enumerate(splits):
+            # Create train/test masks based on season
+            if season_week_index is not None:
+                train_mask = np.isin(swi // 100, train_seasons)
+                test_mask = np.isin(swi // 100, test_seasons)
+            else:
+                # Use simple splits
+                train_end = int(len(y_arr) * (fold_id + 1) / (len(splits) + 1))
+                test_end = train_end + int(len(y_arr) * 0.2)
+                train_mask = np.zeros(len(y_arr), dtype=bool)
+                train_mask[:train_end] = True
+                test_mask = np.zeros(len(y_arr), dtype=bool)
+                test_mask[train_end:test_end] = True
+
+            X_train = X_arr[train_mask]
+            y_train = y_arr[train_mask]
+            X_test = X_arr[test_mask]
+            y_test = y_arr[test_mask]
+
+            if len(X_train) < 50 or len(X_test) < 10:
+                continue
+
+            # Train model
+            model = model_class()
+            try:
+                model.train(X_train, y_train)
+                metrics = model.evaluate(X_test, y_test)
+                mae_scores.append(metrics.mae)
+                ats_records.append((metrics.ats_wins, metrics.ats_losses, metrics.ats_pushes))
+            except Exception as e:
+                logger.warning(f"Fold {fold_id} failed: {e}")
+                continue
+
+        if not mae_scores:
+            logger.warning(f"No valid folds for {model_name}")
+            return
+
+        # Log summary
+        mean_mae = np.mean(mae_scores)
+        std_mae = np.std(mae_scores)
+        total_wins = sum(r[0] for r in ats_records)
+        total_losses = sum(r[1] for r in ats_records)
+        total = total_wins + total_losses
+        win_rate = total_wins / total if total > 0 else 0.0
+
+        logger.info(f"Walk-Forward Results for {model_name}:")
+        logger.info(f"  Folds: {len(mae_scores)}")
+        logger.info(f"  MAE: {mean_mae:.3f} ± {std_mae:.3f}")
+        logger.info(f"  ATS Record: {total_wins}-{total_losses} ({win_rate:.1%})")
+
+    except ImportError:
+        logger.warning("Walk-forward validator not available, skipping")
+    except Exception as e:
+        logger.warning(f"Walk-forward validation failed for {model_name}: {e}")
+
 
 def get_current_nfl_season() -> int:
     """
@@ -328,6 +462,10 @@ async def train_moneyline_model(
         model.metadata.data_cutoff_date = data_cutoff
         model.metadata.training_seasons = seasons
 
+    # Run walk-forward validation
+    from nfl_bets.models.moneyline_model import MoneylineModel
+    run_walkforward_validation(MoneylineModel, X, y, "MoneylineModel")
+
     # Save model
     output_dir.mkdir(parents=True, exist_ok=True)
     model_path = output_dir / f"moneyline_model_v{model.VERSION}.joblib"
@@ -443,6 +581,10 @@ async def train_totals_model(
     logger.info(f"  MAE: {metrics.mae:.2f} points")
     logger.info(f"  RMSE: {metrics.rmse:.2f} points")
     logger.info(f"  R²: {metrics.r2:.3f}")
+
+    # Run walk-forward validation
+    from nfl_bets.models.totals_model import TotalsModel
+    run_walkforward_validation(TotalsModel, X, y, "TotalsModel")
 
     # Save model
     output_dir.mkdir(parents=True, exist_ok=True)
