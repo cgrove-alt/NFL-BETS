@@ -166,7 +166,7 @@ async def debug_value_detection(request: Request) -> dict[str, Any]:
     logger = logging.getLogger(__name__)
 
     debug_info = {
-        "code_version": "v7-lower-threshold",  # Lowered min_edge to 0.5% + debug logging
+        "code_version": "v8-edge-calc-test",  # Added edge_test to debug endpoint
         "pipeline_initialized": app_state.pipeline is not None,
         "feature_pipeline_initialized": app_state.feature_pipeline is not None,
         "value_detector_initialized": app_state.value_detector is not None,
@@ -316,6 +316,52 @@ async def debug_value_detection(request: Request) -> dict[str, Any]:
                                 debug_info["feature_test"]["status"] = "success"
                                 debug_info["feature_test"]["feature_count"] = len(test_features.features)
                                 debug_info["features_built"] = 1  # At least one works
+
+                                # EDGE CALCULATION TEST: Run prediction with line to see actual values
+                                if app_state.value_detector and app_state.value_detector.spread_model:
+                                    # Find odds for this game
+                                    test_odds = None
+                                    for o in transformed:
+                                        if o.get("game_id") == test_game_id:
+                                            test_odds = o
+                                            break
+
+                                    if test_odds:
+                                        line = test_odds.get("home_spread")
+                                        home_odds = test_odds.get("home_odds")
+                                        away_odds = test_odds.get("away_odds")
+
+                                        # Run prediction WITH line
+                                        test_pred = app_state.value_detector.spread_model.predict_game(
+                                            features=test_features.features,
+                                            game_id=test_game_id,
+                                            home_team=test_game.get("home_team"),
+                                            away_team=test_game.get("away_team"),
+                                            line=line,
+                                        )
+
+                                        # Calculate edge manually
+                                        from nfl_bets.betting.odds_converter import american_to_implied_probability, remove_vig
+                                        fair_prob_home, fair_prob_away = remove_vig(home_odds, away_odds)
+                                        edge_home = test_pred.home_cover_prob - float(fair_prob_home)
+                                        edge_away = test_pred.away_cover_prob - float(fair_prob_away)
+
+                                        debug_info["edge_test"] = {
+                                            "game_id": test_game_id,
+                                            "line": line,
+                                            "home_odds": home_odds,
+                                            "away_odds": away_odds,
+                                            "predicted_spread": round(test_pred.predicted_spread, 2),
+                                            "home_cover_prob": round(test_pred.home_cover_prob, 4),
+                                            "away_cover_prob": round(test_pred.away_cover_prob, 4),
+                                            "fair_prob_home": round(float(fair_prob_home), 4),
+                                            "fair_prob_away": round(float(fair_prob_away), 4),
+                                            "edge_home": round(edge_home, 4),
+                                            "edge_away": round(edge_away, 4),
+                                            "threshold": app_state.value_detector.min_edge,
+                                            "home_passes": edge_home >= app_state.value_detector.min_edge,
+                                            "away_passes": edge_away >= app_state.value_detector.min_edge,
+                                        }
                             else:
                                 debug_info["feature_test"]["status"] = "failed"
                                 debug_info["feature_test"]["error"] = "build_spread_features returned None"
