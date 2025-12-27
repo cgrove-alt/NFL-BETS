@@ -17,6 +17,8 @@ import {
   Wifi,
   WifiOff,
   Zap,
+  TestTube,
+  Loader2,
 } from 'lucide-react';
 import {
   getValueBets,
@@ -125,6 +127,10 @@ function LiveConnectionIndicator({
   );
 }
 
+// Maximum retry attempts for cold start
+const MAX_RETRY_ATTEMPTS = 3;
+const RETRY_DELAY_MS = 3000;
+
 export default function Dashboard() {
   const [valueBets, setValueBets] = useState<ValueBetsResponse | null>(null);
   const [bankroll, setBankroll] = useState<BankrollSummary | null>(null);
@@ -138,6 +144,11 @@ export default function Dashboard() {
   // Live connection state
   const [connectionStatus, setConnectionStatus] = useState<'online' | 'degraded' | 'offline' | 'connecting'>('connecting');
   const [healthData, setHealthData] = useState<DetailedHealthStatus | null>(null);
+
+  // Demo mode and cold start state
+  const [isDemoMode, setIsDemoMode] = useState(false);
+  const [isBackendInitializing, setIsBackendInitializing] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
 
   // Game selection state
   const [selectedGame, setSelectedGame] = useState<GameInfo | null>(null);
@@ -154,6 +165,14 @@ export default function Dashboard() {
       const health = await getDetailedHealth();
       setHealthData(health);
       setConnectionStatus(health.status);
+
+      // Update demo mode and initializing status from health
+      if (health.demo_mode !== undefined) {
+        setIsDemoMode(health.demo_mode);
+      }
+      if (health.is_initializing !== undefined) {
+        setIsBackendInitializing(health.is_initializing);
+      }
     } catch {
       setConnectionStatus('offline');
       setHealthData(null);
@@ -184,7 +203,7 @@ export default function Dashboard() {
     }
   }, []);
 
-  const fetchData = async (showRefreshing = false) => {
+  const fetchData = async (showRefreshing = false, currentRetry = 0) => {
     if (showRefreshing) setIsRefreshing(true);
     try {
       const [bets, bank, models, jobs, games] = await Promise.all([
@@ -201,6 +220,33 @@ export default function Dashboard() {
       setJobsStatus(jobs);
       setGamesData(games);
       setError(null);
+
+      // Check for demo mode from games response
+      if (games?.is_demo) {
+        setIsDemoMode(true);
+      }
+
+      // Check for cold start / initializing state with retry logic
+      if (games?.is_initializing && games?.count === 0 && games?.retry_after_seconds) {
+        setIsBackendInitializing(true);
+        setRetryCount(currentRetry);
+
+        // Auto-retry up to MAX_RETRY_ATTEMPTS
+        if (currentRetry < MAX_RETRY_ATTEMPTS) {
+          const retryDelay = (games.retry_after_seconds || 3) * 1000;
+          console.log(`Backend initializing... Retry ${currentRetry + 1}/${MAX_RETRY_ATTEMPTS} in ${retryDelay}ms`);
+
+          setTimeout(() => {
+            fetchData(false, currentRetry + 1);
+          }, retryDelay);
+          return; // Don't finish loading yet
+        } else {
+          console.log('Max retries reached - showing current state');
+        }
+      } else {
+        setIsBackendInitializing(false);
+        setRetryCount(0);
+      }
 
       // Auto-select best game on first load
       if (games?.games && !hasAutoSelected.current) {
@@ -322,6 +368,54 @@ export default function Dashboard() {
           </div>
         </div>
       </header>
+
+      {/* Demo Mode Banner */}
+      <AnimatePresence>
+        {isDemoMode && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="bg-brand-500/10 border-b border-brand-500/20"
+          >
+            <div className="max-w-7xl mx-auto px-4 py-3 sm:px-6 lg:px-8">
+              <div className="flex items-center gap-3">
+                <TestTube className="w-5 h-5 text-brand-500 flex-shrink-0" />
+                <div>
+                  <p className="text-sm font-medium text-brand-600 dark:text-brand-400">Demo Mode Active</p>
+                  <p className="text-xs text-brand-500/70">
+                    Showing sample data for demonstration. Live odds will appear when backend connects to real data sources.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Backend Initializing Banner */}
+      <AnimatePresence>
+        {isBackendInitializing && !isDemoMode && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="bg-warning/10 border-b border-warning/20"
+          >
+            <div className="max-w-7xl mx-auto px-4 py-3 sm:px-6 lg:px-8">
+              <div className="flex items-center gap-3">
+                <Loader2 className="w-5 h-5 text-warning flex-shrink-0 animate-spin" />
+                <div>
+                  <p className="text-sm font-medium text-warning">System Initializing...</p>
+                  <p className="text-xs text-warning/70">
+                    Loading live odds data. {retryCount > 0 ? `Retry ${retryCount}/${MAX_RETRY_ATTEMPTS}` : 'Please wait...'}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Backend Offline Warning Banner */}
       <AnimatePresence>

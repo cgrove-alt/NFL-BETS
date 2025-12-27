@@ -1,11 +1,14 @@
 """Games endpoints - upcoming games with value bet aggregation."""
 
+import logging
 from collections import defaultdict
 from datetime import datetime
 from typing import Any, Optional
 
 from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -32,6 +35,61 @@ class GamesListResponse(BaseModel):
 
     count: int
     games: list[GameResponse]
+    # Cold start / demo mode flags
+    is_demo: bool = False
+    is_initializing: bool = False
+    retry_after_seconds: Optional[int] = None
+
+
+def _build_demo_games(app_state) -> list[GameResponse]:
+    """
+    Build game responses from demo/mock data.
+
+    Args:
+        app_state: Application state with mock games
+
+    Returns:
+        List of GameResponse objects from mock data
+    """
+    response_games = []
+
+    # Get value bets and group by game
+    value_bets = app_state.last_value_bets
+    bets_by_game = defaultdict(list)
+    for bet in value_bets:
+        game_id = getattr(bet, "game_id", "")
+        bets_by_game[game_id].append(bet)
+
+    for game in app_state._mock_games:
+        game_id = game.get("game_id", "")
+        game_bets = bets_by_game.get(game_id, [])
+
+        # Find best edge bet
+        best_bet = None
+        if game_bets:
+            best_bet = max(game_bets, key=lambda b: getattr(b, "edge", 0))
+
+        response_games.append(
+            GameResponse(
+                game_id=game_id,
+                home_team=game.get("home_team", ""),
+                away_team=game.get("away_team", ""),
+                kickoff=game.get("kickoff", ""),
+                week=game.get("week", 1),
+                season=game.get("season", 2024),
+                value_bet_count=len(game_bets),
+                best_edge=getattr(best_bet, "edge", None) if best_bet else None,
+                best_bet_description=getattr(best_bet, "description", None) if best_bet else None,
+                model_prediction=getattr(best_bet, "model_prediction", None) if best_bet else None,
+                model_confidence=getattr(best_bet, "model_probability", None) if best_bet else None,
+                vegas_line=game.get("spread"),
+            )
+        )
+
+    # Sort by kickoff time, then by value bet count (most bets first)
+    response_games.sort(key=lambda g: (g.kickoff, -g.value_bet_count))
+
+    return response_games
 
 
 @router.get("/games", response_model=GamesListResponse)
@@ -46,8 +104,48 @@ async def get_games(
     - Number of value bets per game
     - Best edge available
     - Model prediction vs Vegas line
+
+    Also returns status flags:
+    - is_demo: True if serving mock/demo data
+    - is_initializing: True if backend is still warming up
+    - retry_after_seconds: Suggested retry delay if initializing
     """
     app_state = request.app.state.app_state
+
+    # Get status flags
+    is_demo = getattr(app_state, "_demo_mode", False)
+    is_initializing = getattr(app_state, "_is_initializing", True)
+
+    # DEMO MODE: Return mock games immediately
+    if is_demo and app_state._mock_games:
+        logger.info("🎭 Returning DEMO MODE games")
+        demo_games = _build_demo_games(app_state)
+
+        # Filter by week if specified
+        if week is not None:
+            demo_games = [g for g in demo_games if g.week == week]
+
+        return {
+            "count": len(demo_games),
+            "games": demo_games,
+            "is_demo": True,
+            "is_initializing": False,
+            "retry_after_seconds": None,
+        }
+
+    # COLD START: If still initializing and no data, tell frontend to retry
+    if is_initializing and not app_state.last_value_bets:
+        # Check if we have cached data to show
+        cached_bets = getattr(app_state, "_cached_bets_raw", None)
+        if not cached_bets:
+            logger.info("⏳ System initializing - advising frontend to retry in 5s")
+            return {
+                "count": 0,
+                "games": [],
+                "is_demo": False,
+                "is_initializing": True,
+                "retry_after_seconds": 5,
+            }
 
     # Get upcoming games from pipeline
     games_data = []
@@ -60,9 +158,7 @@ async def get_games(
             )
             games_data = enriched_games
         except Exception as e:
-            # Log but continue - we can still show games without enriched data
-            import logging
-            logging.getLogger(__name__).warning(f"Failed to get enriched games: {e}")
+            logger.warning(f"Failed to get enriched games: {e}")
 
     # Get value bets and group by game
     value_bets = app_state.last_value_bets
@@ -135,6 +231,9 @@ async def get_games(
     return {
         "count": len(response_games),
         "games": response_games,
+        "is_demo": False,
+        "is_initializing": is_initializing,
+        "retry_after_seconds": 5 if is_initializing and len(response_games) == 0 else None,
     }
 
 
@@ -149,6 +248,51 @@ async def get_game_detail(
     Returns the game with all associated value bets.
     """
     app_state = request.app.state.app_state
+
+    # Check demo mode first
+    is_demo = getattr(app_state, "_demo_mode", False)
+
+    if is_demo and app_state._mock_games:
+        # Find game in mock data
+        for game in app_state._mock_games:
+            if game.get("game_id") == game_id:
+                # Get bets for this game
+                game_bets = [
+                    bet for bet in app_state.last_value_bets
+                    if getattr(bet, "game_id", "") == game_id
+                ]
+
+                formatted_bets = []
+                for bet in game_bets:
+                    formatted_bets.append({
+                        "bet_type": getattr(bet, "bet_type", ""),
+                        "description": getattr(bet, "description", ""),
+                        "model_probability": getattr(bet, "model_probability", 0),
+                        "model_prediction": getattr(bet, "model_prediction", 0),
+                        "bookmaker": getattr(bet, "bookmaker", ""),
+                        "odds": getattr(bet, "odds", 0),
+                        "implied_probability": getattr(bet, "implied_probability", 0),
+                        "line": getattr(bet, "line", 0),
+                        "edge": getattr(bet, "edge", 0),
+                        "expected_value": getattr(bet, "expected_value", 0),
+                        "recommended_stake": getattr(bet, "recommended_stake", None),
+                        "urgency": getattr(bet, "urgency", "medium").value if hasattr(getattr(bet, "urgency", None), "value") else "medium",
+                        "detected_at": getattr(bet, "detected_at", datetime.now()).isoformat(),
+                    })
+
+                return {
+                    "game_id": game_id,
+                    "home_team": game.get("home_team", ""),
+                    "away_team": game.get("away_team", ""),
+                    "kickoff": game.get("kickoff", ""),
+                    "week": game.get("week", 1),
+                    "season": game.get("season", 2024),
+                    "value_bets": formatted_bets,
+                    "value_bet_count": len(formatted_bets),
+                    "is_demo": True,
+                }
+
+        return {"error": "Game not found", "game_id": game_id, "is_demo": True}
 
     # Find the game
     game_data = None
@@ -207,4 +351,5 @@ async def get_game_detail(
         "season": game_data.season,
         "value_bets": formatted_bets,
         "value_bet_count": len(formatted_bets),
+        "is_demo": False,
     }

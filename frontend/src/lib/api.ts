@@ -105,6 +105,8 @@ export interface DetailedHealthStatus {
   models_loaded: boolean;
   startup_complete: boolean;
   timestamp: string;
+  demo_mode?: boolean;
+  is_initializing?: boolean;
 }
 
 export interface PerformanceMetrics {
@@ -138,6 +140,10 @@ export interface GameInfo {
 export interface GamesResponse {
   count: number;
   games: GameInfo[];
+  // Cold start / demo mode flags
+  is_demo?: boolean;
+  is_initializing?: boolean;
+  retry_after_seconds?: number | null;
 }
 
 export interface GameDetailResponse {
