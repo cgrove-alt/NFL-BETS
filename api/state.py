@@ -374,169 +374,40 @@ class AppState:
 
     def get_fallback_data(self) -> list:
         """
-        Return hardcoded fallback value bets for when scheduler/live data fails.
+        Fallback value bets - returns empty list.
 
-        HARD FALLBACK: Ensures UI always has data even if serverless kills tasks.
+        Previously returned hardcoded fake bets with fake game matchups
+        (BAL @ KC, DAL @ SF, GB @ DET) that don't exist in the real schedule.
 
-        Returns 3 backup bets:
-        - Chiefs -3.5 (spread)
-        - 49ers Over 24.5 (totals)
-        - Lions Moneyline
+        Now returns empty list - no fake data. The scheduler should produce
+        real value bets from live odds data.
         """
-        from dataclasses import dataclass
-        from enum import Enum
-
-        logger.warning("🚨 FALLBACK MODE: Returning hardcoded backup bets")
-
-        class FallbackUrgency(Enum):
-            HIGH = "high"
-            MEDIUM = "medium"
-            LOW = "low"
-
-        @dataclass
-        class FallbackValueBet:
-            game_id: str
-            bet_type: str
-            description: str
-            model_probability: float
-            model_prediction: float
-            bookmaker: str
-            odds: int
-            implied_probability: float
-            line: float
-            edge: float
-            expected_value: float
-            recommended_stake: float
-            urgency: FallbackUrgency
-            detected_at: datetime
-            expires_at: datetime
-
-        now = datetime.now()
-        # Find next Sunday for realistic game times
-        days_until_sunday = (6 - now.weekday()) % 7
-        if days_until_sunday == 0:
-            days_until_sunday = 7
-        next_sunday = now + timedelta(days=days_until_sunday)
-        next_sunday = next_sunday.replace(hour=13, minute=0, second=0, microsecond=0)
-
-        # Dynamic season calculation: NFL season year is based on when season started
-        # Season starts in September, so if we're in Jan-Aug, use previous year
-        current_season = now.year if now.month >= 9 else now.year - 1
-
-        fallback_bets = [
-            FallbackValueBet(
-                game_id=f"{current_season}_17_BAL_KC",
-                bet_type="spread",
-                description="KC -3.5",
-                model_probability=0.58,
-                model_prediction=-5.2,
-                bookmaker="DraftKings",
-                odds=-110,
-                implied_probability=0.524,
-                line=-3.5,
-                edge=0.056,
-                expected_value=0.052,
-                recommended_stake=25.0,
-                urgency=FallbackUrgency.HIGH,
-                detected_at=now,
-                expires_at=next_sunday,
-            ),
-            FallbackValueBet(
-                game_id=f"{current_season}_17_DAL_SF",
-                bet_type="totals",
-                description="SF Over 24.5",
-                model_probability=0.55,
-                model_prediction=27.3,
-                bookmaker="FanDuel",
-                odds=-115,
-                implied_probability=0.535,
-                line=24.5,
-                edge=0.042,
-                expected_value=0.038,
-                recommended_stake=20.0,
-                urgency=FallbackUrgency.MEDIUM,
-                detected_at=now,
-                expires_at=next_sunday + timedelta(hours=1),
-            ),
-            FallbackValueBet(
-                game_id=f"{current_season}_17_GB_DET",
-                bet_type="moneyline",
-                description="DET ML",
-                model_probability=0.62,
-                model_prediction=-4.0,
-                bookmaker="DraftKings",
-                odds=-180,
-                implied_probability=0.643,
-                line=-180.0,
-                edge=0.035,
-                expected_value=0.032,
-                recommended_stake=30.0,
-                urgency=FallbackUrgency.MEDIUM,
-                detected_at=now,
-                expires_at=next_sunday + timedelta(hours=2),
-            ),
-        ]
-
-        self._using_fallback = True
-        return fallback_bets
+        logger.warning("get_fallback_data called - returning empty list (no fake bets)")
+        self._using_fallback = False  # Not using fake fallback
+        return []
 
     def get_fallback_games(self) -> list:
         """
-        Return hardcoded fallback games matching the fallback bets.
+        Fallback games - returns empty list.
 
-        Returns list of game dicts for the 3 fallback games.
+        Previously returned hardcoded fake games, but this caused
+        confusion when fake matchups (BAL @ KC) were shown that
+        don't exist in the real schedule.
+
+        Now returns empty list - let the UI handle "no games" gracefully.
+        The pipeline should be fetching real games from nflverse.
         """
-        now = datetime.now()
-        days_until_sunday = (6 - now.weekday()) % 7
-        if days_until_sunday == 0:
-            days_until_sunday = 7
-        next_sunday = now + timedelta(days=days_until_sunday)
-        next_sunday = next_sunday.replace(hour=13, minute=0, second=0, microsecond=0)
-
-        # Dynamic season calculation: NFL season year is based on when season started
-        # Season starts in September, so if we're in Jan-Aug, use previous year
-        current_season = now.year if now.month >= 9 else now.year - 1
-
-        return [
-            {
-                "game_id": f"{current_season}_17_BAL_KC",
-                "home_team": "KC",
-                "away_team": "BAL",
-                "kickoff": next_sunday.isoformat(),
-                "week": 17,
-                "season": current_season,
-                "spread": -3.5,
-                "total": 47.5,
-            },
-            {
-                "game_id": f"{current_season}_17_DAL_SF",
-                "home_team": "SF",
-                "away_team": "DAL",
-                "kickoff": (next_sunday + timedelta(hours=1)).isoformat(),
-                "week": 17,
-                "season": current_season,
-                "spread": -2.5,
-                "total": 49.0,
-            },
-            {
-                "game_id": f"{current_season}_17_GB_DET",
-                "home_team": "DET",
-                "away_team": "GB",
-                "kickoff": (next_sunday + timedelta(hours=2)).isoformat(),
-                "week": 17,
-                "season": current_season,
-                "spread": -4.0,
-                "total": 48.0,
-            },
-        ]
+        logger.warning("get_fallback_games called - returning empty list (no fake games)")
+        return []
 
     @property
     def last_value_bets(self) -> list:
         """
         Get last detected value bets from scheduler.
 
-        HARD FALLBACK: If scheduler is None or returns empty list,
-        return hardcoded fallback data to ensure UI always has content.
+        Returns real value bets only - no fake fallback data.
+        If no value bets are found, returns empty list (this is valid -
+        it means the market is efficient or no edges were detected).
         """
         self._using_fallback = False  # Reset flag
 
@@ -550,8 +421,10 @@ class AppState:
         if self._last_value_bets and len(self._last_value_bets) > 0:
             return self._last_value_bets
 
-        # FALLBACK: Return hardcoded bets so UI always has data
-        return self.get_fallback_data()
+        # No bets found - return empty list (NOT fake fallback data)
+        # This is valid: it means no value edges were detected
+        logger.info("No value bets in memory - market may be efficient or poll hasn't run yet")
+        return []
 
     async def _perform_startup_refresh(self) -> None:
         """
