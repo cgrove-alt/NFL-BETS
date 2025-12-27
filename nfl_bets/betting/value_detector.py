@@ -508,7 +508,7 @@ class ValueDetector:
         )
 
         # Check thresholds
-        if edge < self.min_edge or ev < self.min_ev:
+        if edge < self.min_edge:  # Only check edge, not EV (vig makes small edge EV negative)
             return None
 
         # Determine urgency (boost for situational edge)
@@ -657,7 +657,7 @@ class ValueDetector:
         )
 
         # Check thresholds
-        if edge < self.min_edge or ev < self.min_ev:
+        if edge < self.min_edge:  # Only check edge, not EV (vig makes small edge EV negative)
             return None
 
         # Determine urgency
@@ -820,7 +820,7 @@ class ValueDetector:
         )
 
         # Check thresholds
-        if edge < self.min_edge or ev < self.min_ev:
+        if edge < self.min_edge:  # Only check edge, not EV (vig makes small edge EV negative)
             return None
 
         # Determine urgency
@@ -887,7 +887,10 @@ class ValueDetector:
         )
 
         # Check thresholds
-        if edge < self.min_edge or ev < self.min_ev:
+        # NOTE: Only check edge, not EV. At vigged odds (-110 to -120), small edges
+        # produce negative EV, but they still represent value vs the market.
+        # The edge tells us we're beating the no-vig line, which is what matters.
+        if edge < self.min_edge:
             return None
 
         # Determine urgency
@@ -1023,7 +1026,7 @@ class ValueDetector:
         )
 
         # Check thresholds
-        if edge < self.min_edge or ev < self.min_ev:
+        if edge < self.min_edge:  # Only check edge, not EV (vig makes small edge EV negative)
             return None
 
         # Determine urgency
