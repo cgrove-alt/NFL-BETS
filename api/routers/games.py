@@ -500,14 +500,18 @@ async def get_game_detail(
     is_demo = get_val(app_state, "_demo_mode", False)
 
     if is_demo and app_state._mock_games:
+        print(f"DEBUG [DEMO MODE]: Looking for game_id='{game_id}' (Type: {type(game_id).__name__})")
         # Find game in mock data using fuzzy matching
         for game in app_state._mock_games:
-            if _game_ids_match(get_val(game, "game_id", ""), game_id):
+            mock_game_id = str(get_val(game, "game_id", ""))
+            print(f"DEBUG [DEMO MODE]: Comparing with mock game_id='{mock_game_id}' | Match: {_game_ids_match(mock_game_id, str(game_id))}")
+            if _game_ids_match(mock_game_id, str(game_id)):
                 # Get bets for this game using FUZZY matching
                 game_bets = [
                     bet for bet in app_state.last_value_bets
-                    if _game_ids_match(_get_bet_game_id(bet), game_id)
+                    if _game_ids_match(str(get_val(bet, "game_id", "")), str(game_id))
                 ]
+                print(f"DEBUG [DEMO MODE]: Found {len(game_bets)} matching bets")
 
                 # Format bets with game_id included
                 formatted_bets = [_format_bet(bet, game_id) for bet in game_bets]
@@ -540,25 +544,34 @@ async def get_game_detail(
     using_fallback = get_val(app_state, "_using_fallback", False)
 
     if not is_initialized or using_fallback:
+        print(f"DEBUG [FALLBACK MODE]: Serving game_id='{game_id}' (Type: {type(game_id).__name__})")
+        print(f"DEBUG [FALLBACK MODE]: initialized={is_initialized}, using_fallback={using_fallback}")
         logger.info(f"🔄 FALLBACK MODE: Serving game {game_id} from fallback data (initialized={is_initialized}, using_fallback={using_fallback})")
 
         # Get fallback games and bets directly - DO NOT query pipeline
         fallback_games = app_state.get_fallback_games()
         fallback_bets = app_state.get_fallback_data()
 
-        # Find the specific game using FUZZY matching
+        print(f"DEBUG [FALLBACK MODE]: {len(fallback_games)} fallback games, {len(fallback_bets)} fallback bets")
+
+        # Find the specific game using FUZZY matching with str() normalization
         target_game = None
+        target_game_id = str(game_id)
         for fg in fallback_games:
-            if _game_ids_match(get_val(fg, "game_id", ""), game_id):
+            fg_game_id = str(get_val(fg, "game_id", ""))
+            print(f"DEBUG [FALLBACK MODE]: Comparing '{target_game_id}' with fallback '{fg_game_id}' | Match: {_game_ids_match(fg_game_id, target_game_id)}")
+            if _game_ids_match(fg_game_id, target_game_id):
                 target_game = fg
                 break
 
         if target_game:
-            # Filter bets for this game using FUZZY matching
-            game_bets = [
-                bet for bet in fallback_bets
-                if _game_ids_match(_get_bet_game_id(bet), game_id)
-            ]
+            # Filter bets for this game using FUZZY matching with str() normalization
+            game_bets = []
+            for bet in fallback_bets:
+                bet_game_id = str(get_val(bet, "game_id", ""))
+                if _game_ids_match(bet_game_id, target_game_id):
+                    game_bets.append(bet)
+            print(f"DEBUG [FALLBACK MODE]: Found {len(game_bets)} matching bets")
 
             # Format bets with game_id included
             formatted_bets = [_format_bet(bet, game_id) for bet in game_bets]
@@ -601,15 +614,29 @@ async def get_game_detail(
     # Get value bets for this game using FUZZY matching (handles season mismatch)
     value_bets = app_state.last_value_bets
 
-    # Debug logging - show what we're trying to match
+    # ==========================================================================
+    # DEBUG: Type mismatch detection - this will appear in Railway logs
+    # ==========================================================================
+    target_game_id = str(game_id)  # Normalize to string
+    print(f"DEBUG: Request game_id='{target_game_id}' (Type: {type(game_id).__name__})")
+    print(f"DEBUG: Total value_bets in memory: {len(value_bets)}")
+
+    # Debug logging - show what we're trying to match with types
+    for i, bet in enumerate(value_bets[:5]):
+        bet_game_id = str(get_val(bet, "game_id", ""))
+        print(f"DEBUG: Bet[{i}] game_id='{bet_game_id}' (Type: {type(get_val(bet, 'game_id', '')).__name__}) | Match: {_game_ids_match(bet_game_id, target_game_id)}")
+
     bet_game_ids = [_get_bet_game_id(bet) for bet in value_bets[:5]]
     logger.info(f"[{game_id}] Looking for match in bet game_ids: {bet_game_ids}")
 
-    game_bets = [
-        bet for bet in value_bets
-        if _game_ids_match(_get_bet_game_id(bet), game_id)
-    ]
+    # Filter bets using FUZZY matching with normalized string comparison
+    game_bets = []
+    for bet in value_bets:
+        bet_game_id = str(get_val(bet, "game_id", ""))
+        if _game_ids_match(bet_game_id, target_game_id):
+            game_bets.append(bet)
 
+    print(f"DEBUG: Found {len(game_bets)} matching bets for game '{target_game_id}'")
     logger.info(f"[{game_id}] Found {len(game_bets)} matching bets using fuzzy matching")
 
     # =========================================================================
