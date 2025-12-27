@@ -9,6 +9,41 @@ from pydantic import BaseModel
 router = APIRouter()
 
 
+def get_val(obj: Any, key: str, default: Any = None) -> Any:
+    """
+    Universal accessor for both Class Objects and Dictionaries.
+
+    Handles the data type mismatch between:
+    - Live data: Python objects with getattr()
+    - Fallback data: Dictionaries with dict.get()
+    """
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _get_urgency_str(bet: Any) -> str:
+    """Extract urgency as uppercase string from bet object or dict."""
+    urgency = get_val(bet, 'urgency', 'MEDIUM')
+    if hasattr(urgency, 'value'):
+        return urgency.value.upper()
+    if isinstance(urgency, str):
+        return urgency.upper()
+    return str(urgency).upper()
+
+
+def _get_datetime_iso(bet: Any, key: str) -> str:
+    """Extract datetime field as ISO string."""
+    val = get_val(bet, key)
+    if val is None:
+        return datetime.now().isoformat()
+    if hasattr(val, 'isoformat'):
+        return val.isoformat()
+    return str(val)
+
+
 class ValueBetResponse(BaseModel):
     """Response model for a value bet."""
 
@@ -56,21 +91,22 @@ async def get_value_bets(
     # Get value bets from scheduler
     value_bets = app_state.last_value_bets
 
-    # Apply filters
+    # Apply filters using get_val() for both objects and dicts
     filtered_bets = []
     for bet in value_bets:
         # Filter by edge
-        if bet.edge < min_edge:
+        bet_edge = get_val(bet, 'edge', 0)
+        if bet_edge < min_edge:
             continue
 
         # Filter by bet type
-        if bet_type and bet.bet_type != bet_type:
+        if bet_type and get_val(bet, 'bet_type', '') != bet_type:
             continue
 
         # Filter by urgency
         if urgency:
-            bet_urgency = bet.urgency.value if hasattr(bet.urgency, "value") else str(bet.urgency)
-            if bet_urgency.upper() != urgency.upper():
+            bet_urgency = _get_urgency_str(bet)
+            if bet_urgency != urgency.upper():
                 continue
 
         filtered_bets.append(bet)
@@ -78,25 +114,25 @@ async def get_value_bets(
     # Limit results
     filtered_bets = filtered_bets[:limit]
 
-    # Convert to response format
+    # Convert to response format using get_val() for universal access
     response_bets = []
     for bet in filtered_bets:
         response_bets.append(
             ValueBetResponse(
-                bet_type=bet.bet_type,
-                game_id=bet.game_id,
-                description=bet.description,
-                model_probability=bet.model_probability,
-                model_prediction=bet.model_prediction,
-                bookmaker=bet.bookmaker,
-                odds=bet.odds,
-                implied_probability=bet.implied_probability,
-                line=bet.line,
-                edge=bet.edge,
-                expected_value=bet.expected_value,
-                recommended_stake=bet.recommended_stake,
-                urgency=bet.urgency.value if hasattr(bet.urgency, "value") else str(bet.urgency),
-                detected_at=bet.detected_at.isoformat() if bet.detected_at else datetime.now().isoformat(),
+                bet_type=get_val(bet, 'bet_type', 'unknown'),
+                game_id=get_val(bet, 'game_id', ''),
+                description=get_val(bet, 'description', ''),
+                model_probability=get_val(bet, 'model_probability', 0.0),
+                model_prediction=get_val(bet, 'model_prediction', 0.0),
+                bookmaker=get_val(bet, 'bookmaker', 'unknown'),
+                odds=get_val(bet, 'odds', 0),
+                implied_probability=get_val(bet, 'implied_probability', 0.0),
+                line=get_val(bet, 'line', 0.0),
+                edge=get_val(bet, 'edge', 0.0),
+                expected_value=get_val(bet, 'expected_value', 0.0),
+                recommended_stake=get_val(bet, 'recommended_stake'),
+                urgency=_get_urgency_str(bet),
+                detected_at=_get_datetime_iso(bet, 'detected_at'),
                 expires_at=None,  # ValueBet doesn't have expires_at field
             )
         )
@@ -229,14 +265,14 @@ async def debug_value_detection(request: Request) -> dict[str, Any]:
         # Get current value bets in memory
         debug_info["value_bets_in_memory"] = len(app_state.last_value_bets)
 
-        # Show sample value bets if any
+        # Show sample value bets if any (using get_val for universal access)
         if app_state.last_value_bets:
             debug_info["sample_value_bets"] = [
                 {
-                    "description": bet.description,
-                    "edge": bet.edge,
-                    "model_probability": bet.model_probability,
-                    "odds": bet.odds,
+                    "description": get_val(bet, 'description', ''),
+                    "edge": get_val(bet, 'edge', 0),
+                    "model_probability": get_val(bet, 'model_probability', 0),
+                    "odds": get_val(bet, 'odds', 0),
                 }
                 for bet in app_state.last_value_bets[:3]
             ]
@@ -282,20 +318,21 @@ async def get_value_bets_summary(request: Request) -> dict[str, Any]:
             "total_expected_value": 0,
         }
 
-    # Count by urgency
+    # Count by urgency (using get_val for universal access)
     by_urgency = {}
     for bet in value_bets:
-        urgency = bet.urgency.value if hasattr(bet.urgency, "value") else str(bet.urgency)
+        urgency = _get_urgency_str(bet)
         by_urgency[urgency] = by_urgency.get(urgency, 0) + 1
 
     # Count by bet type
     by_bet_type = {}
     for bet in value_bets:
-        by_bet_type[bet.bet_type] = by_bet_type.get(bet.bet_type, 0) + 1
+        bet_type = get_val(bet, 'bet_type', 'unknown')
+        by_bet_type[bet_type] = by_bet_type.get(bet_type, 0) + 1
 
     # Calculate averages
-    total_edge = sum(bet.edge for bet in value_bets)
-    total_ev = sum(bet.expected_value for bet in value_bets)
+    total_edge = sum(get_val(bet, 'edge', 0) for bet in value_bets)
+    total_ev = sum(get_val(bet, 'expected_value', 0) for bet in value_bets)
 
     return {
         "total_bets": len(value_bets),

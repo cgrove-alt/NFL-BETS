@@ -658,6 +658,13 @@ async def get_all_predictions(
     if game_id:
         games = [g for g in games if g.get("game_id") == game_id]
 
+    # Create schedules_df from current games for feature building
+    # This fixes the season mismatch: games are labeled 2025 but PBP data is 2024
+    # By passing pre-loaded schedules, feature builders can find the games correctly
+    import polars as pl
+    schedules_df = pl.DataFrame(games)
+    logger.debug(f"Created schedules_df with {len(schedules_df)} games for feature building")
+
     # Generate predictions for each game
     game_predictions = []
     total_players_processed = 0
@@ -683,13 +690,14 @@ async def get_all_predictions(
         spread_model = value_detector.spread_model
         if spread_model:
             try:
-                # Build spread features
+                # Build spread features (pass schedules_df to fix season mismatch)
                 spread_features = await app_state.feature_pipeline.build_spread_features(
                     game_id=gid,
                     home_team=home_team,
                     away_team=away_team,
                     season=season,
                     week=int(week),
+                    schedules_df=schedules_df,
                 )
 
                 if spread_features and spread_features.features:

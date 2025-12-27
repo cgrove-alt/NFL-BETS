@@ -556,7 +556,7 @@ class AppState:
             if self.scheduler:
                 logger.info("🔄 Running startup value bet poll...")
                 # Use the scheduler's poll method which handles everything
-                await self.scheduler._poll_value_bets()
+                await self.scheduler._poll_odds_job()
                 self._last_data_refresh = datetime.now()
                 self._startup_refresh_complete = True
                 self._is_initializing = False
