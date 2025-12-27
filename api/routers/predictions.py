@@ -702,6 +702,7 @@ async def get_all_predictions(
 
                 if spread_features and spread_features.features:
                     # Get spread prediction
+                    logger.info(f"Built spread features for {gid}: {len(spread_features.features)} features")
                     spread_prediction = spread_model.predict_game(
                         features=spread_features.features,
                         game_id=gid,
@@ -743,6 +744,9 @@ async def get_all_predictions(
                     )
 
                     logger.info(f"Spread prediction for {gid}: {spread_pred} (DK: {dk_spread.get('line') if dk_spread else 'N/A'})")
+
+                else:
+                    logger.warning(f"Spread features NULL or EMPTY for {gid} - cannot generate prediction")
 
             except Exception as e:
                 logger.warning(f"Failed to generate spread prediction for {gid}: {e}")
@@ -820,6 +824,7 @@ async def get_all_predictions(
                         )
 
                         if features is None or features.features is None:
+                            logger.debug(f"Prop features NULL for {player_name} ({prop_type}) - skipping")
                             continue
 
                         # Make prediction
@@ -1078,6 +1083,12 @@ async def get_game_predictions(
     if isinstance(kickoff, datetime):
         kickoff = kickoff.isoformat()
 
+    # Create schedules_df from current games for feature building
+    # This fixes the season mismatch: games are labeled 2025 but PBP data is 2024
+    import polars as pl
+    schedules_df = pl.DataFrame(games)
+    logger.debug(f"Created schedules_df with {len(schedules_df)} games for path endpoint")
+
     # Generate spread prediction
     spread_response = None
     spread_pred = None
@@ -1091,9 +1102,11 @@ async def get_game_predictions(
                 away_team=away_team,
                 season=season,
                 week=int(week),
+                schedules_df=schedules_df,  # Fix: Pass schedules_df to avoid season mismatch
             )
 
             if spread_features and spread_features.features:
+                logger.info(f"[{game_id}] Built spread features: {len(spread_features.features)} features")
                 spread_prediction = spread_model.predict_game(
                     features=spread_features.features,
                     game_id=gid,
@@ -1133,6 +1146,8 @@ async def get_game_predictions(
                 )
 
                 logger.info(f"[{game_id}] Spread prediction: {spread_pred}")
+            else:
+                logger.warning(f"[{game_id}] Spread features NULL or EMPTY - cannot generate prediction")
 
         except Exception as e:
             logger.warning(f"[{game_id}] Failed to generate spread prediction: {e}")
