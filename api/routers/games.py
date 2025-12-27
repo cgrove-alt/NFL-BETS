@@ -381,46 +381,106 @@ async def get_game_detail(
         except Exception:
             pass
 
-    if not game_data:
-        return {"error": "Game not found", "game_id": game_id}
-
     # Get value bets for this game
     value_bets = app_state.last_value_bets
-    game_bets = [bet for bet in value_bets if bet.game_id == game_id]
+    game_bets = [bet for bet in value_bets if getattr(bet, "game_id", "") == game_id]
+
+    # FALLBACK RECOVERY: If pipeline failed, reconstruct game from bets or fallback data
+    is_fallback = False
+    if not game_data:
+        logger.warning(f"🔄 Pipeline failed for game {game_id} - attempting fallback recovery")
+
+        # First, try to find game in fallback games
+        fallback_games = app_state.get_fallback_games()
+        for fg in fallback_games:
+            if fg.get("game_id") == game_id:
+                logger.info(f"✅ Found game {game_id} in fallback games")
+                # Create synthetic game object from fallback data
+                game_data = type("SyntheticGame", (), {
+                    "game_id": game_id,
+                    "home_team": fg.get("home_team", "Unknown"),
+                    "away_team": fg.get("away_team", "Unknown"),
+                    "kickoff": fg.get("kickoff", datetime.now().isoformat()),
+                    "week": fg.get("week", 17),
+                    "season": fg.get("season", 2024),
+                })()
+                is_fallback = True
+                break
+
+        # If still no game_data, try to reconstruct from bet metadata
+        if not game_data and game_bets:
+            logger.info(f"✅ Reconstructing game {game_id} from bet metadata")
+            sample_bet = game_bets[0]
+
+            # Parse game_id format: "YYYY_WW_AWAY_HOME" (e.g., "2024_17_BAL_KC")
+            parts = game_id.split("_")
+            if len(parts) >= 4:
+                season = int(parts[0]) if parts[0].isdigit() else 2024
+                week = int(parts[1]) if parts[1].isdigit() else 17
+                away_team = parts[2]
+                home_team = parts[3]
+            else:
+                # Fallback parsing
+                season = 2024
+                week = 17
+                home_team = "Unknown"
+                away_team = "Unknown"
+
+            # Try to extract kickoff from bet if available
+            kickoff = getattr(sample_bet, "detected_at", datetime.now())
+            if isinstance(kickoff, datetime):
+                kickoff = kickoff.isoformat()
+
+            game_data = type("SyntheticGame", (), {
+                "game_id": game_id,
+                "home_team": home_team,
+                "away_team": away_team,
+                "kickoff": kickoff,
+                "week": week,
+                "season": season,
+            })()
+            is_fallback = True
+
+        # If STILL no game_data, return error
+        if not game_data:
+            logger.error(f"❌ Could not recover game {game_id} - no fallback or bets available")
+            return {"error": "Game not found", "game_id": game_id}
 
     # Format bets
     formatted_bets = []
     for bet in game_bets:
         formatted_bets.append({
-            "bet_type": bet.bet_type,
-            "description": bet.description,
-            "model_probability": bet.model_probability,
-            "model_prediction": bet.model_prediction,
-            "bookmaker": bet.bookmaker,
-            "odds": bet.odds,
-            "implied_probability": bet.implied_probability,
-            "line": bet.line,
-            "edge": bet.edge,
-            "expected_value": bet.expected_value,
-            "recommended_stake": bet.recommended_stake,
-            "urgency": bet.urgency.value if hasattr(bet.urgency, "value") else str(bet.urgency),
-            "detected_at": bet.detected_at.isoformat() if bet.detected_at else None,
+            "bet_type": getattr(bet, "bet_type", ""),
+            "description": getattr(bet, "description", ""),
+            "model_probability": getattr(bet, "model_probability", 0),
+            "model_prediction": getattr(bet, "model_prediction", 0),
+            "bookmaker": getattr(bet, "bookmaker", ""),
+            "odds": getattr(bet, "odds", 0),
+            "implied_probability": getattr(bet, "implied_probability", 0),
+            "line": getattr(bet, "line", 0),
+            "edge": getattr(bet, "edge", 0),
+            "expected_value": getattr(bet, "expected_value", 0),
+            "recommended_stake": getattr(bet, "recommended_stake", None),
+            "urgency": getattr(bet, "urgency", "medium").value if hasattr(getattr(bet, "urgency", None), "value") else str(getattr(bet, "urgency", "medium")),
+            "detected_at": getattr(bet, "detected_at", datetime.now()).isoformat() if getattr(bet, "detected_at", None) else None,
         })
 
     # Sort by edge descending
     formatted_bets.sort(key=lambda b: b["edge"], reverse=True)
 
     # Format kickoff
-    kickoff_str = game_data.kickoff.isoformat() if isinstance(game_data.kickoff, datetime) else str(game_data.kickoff)
+    kickoff_val = getattr(game_data, "kickoff", datetime.now())
+    kickoff_str = kickoff_val.isoformat() if isinstance(kickoff_val, datetime) else str(kickoff_val)
 
     return {
         "game_id": game_id,
-        "home_team": game_data.home_team,
-        "away_team": game_data.away_team,
+        "home_team": getattr(game_data, "home_team", "Unknown"),
+        "away_team": getattr(game_data, "away_team", "Unknown"),
         "kickoff": kickoff_str,
-        "week": game_data.week,
-        "season": game_data.season,
+        "week": getattr(game_data, "week", 17),
+        "season": getattr(game_data, "season", 2024),
         "value_bets": formatted_bets,
         "value_bet_count": len(formatted_bets),
         "is_demo": False,
+        "is_fallback": is_fallback,
     }

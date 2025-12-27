@@ -157,6 +157,8 @@ export interface GameDetailResponse {
   season: number;
   value_bets: ValueBet[];
   value_bet_count: number;
+  is_demo?: boolean;
+  is_fallback?: boolean;
 }
 
 // API Functions
