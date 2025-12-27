@@ -22,7 +22,7 @@ import numpy as np
 import polars as pl
 from loguru import logger
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split, TimeSeriesSplit, StratifiedKFold
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import log_loss, accuracy_score
 
 try:
@@ -754,11 +754,12 @@ class MoneylineModel(BaseModel):
                 "lr": lr_weight,
             }
 
-            # Stratified K-Fold for classification
-            skf = StratifiedKFold(n_splits=n_cv_splits, shuffle=True, random_state=42)
+            # Time-series cross-validation to prevent look-ahead bias
+            # CRITICAL: Do NOT use StratifiedKFold with shuffle=True for time-series data
+            tscv = TimeSeriesSplit(n_splits=n_cv_splits)
             cv_scores = []
 
-            for train_idx, val_idx in skf.split(X_arr, y_arr):
+            for train_idx, val_idx in tscv.split(X_arr):
                 X_train, X_val = X_arr[train_idx], X_arr[val_idx]
                 y_train, y_val = y_arr[train_idx], y_arr[val_idx]
 
@@ -864,9 +865,12 @@ class MoneylineModel(BaseModel):
             use_calibration=True,
         )
 
-        X_train, X_val, y_train, y_val = train_test_split(
-            X_arr, y_arr, test_size=0.2, random_state=42, stratify=y_arr
-        )
+        # CRITICAL: Use chronological split, NOT random split
+        # Data must be pre-sorted by time for this to work correctly
+        n_samples = len(y_arr)
+        split_idx = int(n_samples * 0.8)
+        X_train, y_train = X_arr[:split_idx], y_arr[:split_idx]
+        X_val, y_val = X_arr[split_idx:], y_arr[split_idx:]
 
         final_model.train(
             X_train, y_train,

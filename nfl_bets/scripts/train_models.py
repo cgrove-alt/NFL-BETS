@@ -42,6 +42,38 @@ WALKFORWARD_TRAIN_SEASONS = 3
 WALKFORWARD_TEST_SEASONS = 1
 
 
+class DataLeakageError(Exception):
+    """Raised when chronological ordering is violated."""
+    pass
+
+
+def validate_chronological_order(df: pl.DataFrame, name: str = "dataset") -> None:
+    """
+    Validate that data is chronologically ordered to prevent look-ahead bias.
+
+    Args:
+        df: DataFrame that must contain 'season_week_index' column
+        name: Name of dataset for error messages
+
+    Raises:
+        DataLeakageError: If data is not chronologically ordered
+    """
+    if "season_week_index" not in df.columns:
+        logger.warning(f"{name}: No season_week_index column, cannot validate ordering")
+        return
+
+    swi = df["season_week_index"].to_numpy()
+    is_sorted = all(swi[i] <= swi[i+1] for i in range(len(swi)-1))
+
+    if not is_sorted:
+        raise DataLeakageError(
+            f"CRITICAL: {name} is NOT chronologically ordered! "
+            "This will cause data leakage. Data must be sorted by season_week_index."
+        )
+
+    logger.debug(f"{name}: Chronological order validated ({len(df)} samples)")
+
+
 def run_walkforward_validation(
     model_class,
     X: pl.DataFrame,
@@ -374,6 +406,9 @@ async def train_spread_model(
 
     logger.info("Training spread model...")
 
+    # CRITICAL: Validate chronological ordering before training
+    validate_chronological_order(X, "spread_training_data")
+
     # Create model
     model = SpreadModel()
 
@@ -437,6 +472,9 @@ async def train_moneyline_model(
     from nfl_bets.models.moneyline_model import MoneylineModel
 
     logger.info("Training moneyline model...")
+
+    # CRITICAL: Validate chronological ordering before training
+    validate_chronological_order(X, "moneyline_training_data")
 
     # Create model
     model = MoneylineModel()
@@ -550,6 +588,9 @@ async def train_totals_model(
     from nfl_bets.models.totals_model import TotalsModel
 
     logger.info("Training totals model...")
+
+    # CRITICAL: Validate chronological ordering before training
+    validate_chronological_order(X, "totals_training_data")
 
     # Create model
     model = TotalsModel()
@@ -684,6 +725,9 @@ async def train_prop_model(
     if len(X) == 0:
         logger.warning(f"No training data for {prop_type}, skipping")
         return
+
+    # CRITICAL: Validate chronological ordering before training
+    validate_chronological_order(X, f"{prop_type}_training_data")
 
     logger.info(f"Built dataset with {len(X)} player-games and {len(X.columns)} features")
 
