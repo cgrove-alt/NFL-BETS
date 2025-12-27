@@ -156,3 +156,77 @@ The props parser uses `player_name` as `player_id`, but the feature pipeline exp
 2. Check that predictions are reasonable (e.g., Patrick Mahomes ~275 passing yards)
 3. Verify poll_props job runs during active hours
 4. Check logs for any player ID resolution failures
+
+---
+
+## Game Bets Not Showing Fix (2025-12-26)
+
+### Problem Statement
+The NFL Bets dashboard header showed "Live Odds Active - 3 bets" (value bets ARE detected globally) and Model Spread showed "+7.0" (predictions ARE working), but when selecting a game (e.g., HOU @ LAC), it displayed "0 Value Bets" and empty Spread/Moneyline/Totals sections.
+
+### Root Cause
+**Game_ID format mismatch** at `api/routers/games.py:568`:
+```python
+game_bets = [
+    bet for bet in value_bets
+    if _get_bet_game_id(bet) == game_id  # STRICT STRING COMPARISON FAILS
+]
+```
+
+Why it fails:
+1. Games from nflverse use one season year (could be 2024 or 2025)
+2. Value bets get game_id from `_transform_odds_data` which may use a different season
+3. Strict `==` comparison fails on any season mismatch
+4. Fallback data used hardcoded `2024_17_*` game_ids
+
+### Fix Implemented (Commit: fd0532b)
+
+**1. `api/routers/games.py`**
+- Added `_game_ids_match()` helper function that compares week + teams, ignores season
+- Replaced all strict `== game_id` comparisons with `_game_ids_match()`:
+  - Demo mode game lookup
+  - Demo mode bet filtering
+  - Fallback mode game lookup
+  - Fallback mode bet filtering
+  - Normal mode bet filtering
+  - Fallback recovery game lookup
+- Added debug logging to show bet game_ids being compared
+
+**2. `api/routers/value_bets.py`**
+- Added `game_id` field to debug endpoint output for visibility in diagnostics
+
+**3. `api/state.py`**
+- Changed hardcoded `2024_17_*` game_ids to dynamic calculation:
+  ```python
+  current_season = now.year if now.month >= 9 else now.year - 1
+  game_id = f"{current_season}_17_BAL_KC"
+  ```
+- Updated both `get_fallback_data()` and `get_fallback_games()`
+- Also updated `season` field in fallback games to use dynamic value
+
+### Key Technical Decision: Fuzzy Matching
+The `_game_ids_match()` function:
+```python
+def _game_ids_match(bet_game_id: str, query_game_id: str) -> bool:
+    # Exact match - fast path
+    if bet_game_id == query_game_id:
+        return True
+
+    # Fuzzy match - compare week + teams, ignore season
+    # Format: YYYY_WW_AWAY_HOME
+    bet_parts = bet_game_id.split("_")
+    query_parts = query_game_id.split("_")
+
+    if len(bet_parts) >= 4 and len(query_parts) >= 4:
+        return bet_parts[1:4] == query_parts[1:4]  # week, away, home
+
+    return False
+```
+
+This ensures that `2024_17_HOU_LAC` matches `2025_17_HOU_LAC` since the only difference is the season year.
+
+### Verification
+1. Check `/api/value-bets/debug` - verify game_ids are visible in sample_value_bets
+2. Check Railway logs for matching attempts: `[game_id] Looking for match in bet game_ids: [...]`
+3. Select a game with value bets - bets should now display correctly
+4. Test with fallback data by temporarily disabling scheduler

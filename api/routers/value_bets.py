@@ -166,7 +166,7 @@ async def debug_value_detection(request: Request) -> dict[str, Any]:
     logger = logging.getLogger(__name__)
 
     debug_info = {
-        "code_version": "v5-feature-fix",  # Update this to verify deployment
+        "code_version": "v6-edge-fix",  # Fixed: pass line to predict_game for proper home_cover_prob
         "pipeline_initialized": app_state.pipeline is not None,
         "feature_pipeline_initialized": app_state.feature_pipeline is not None,
         "value_detector_initialized": app_state.value_detector is not None,

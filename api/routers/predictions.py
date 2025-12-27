@@ -701,20 +701,22 @@ async def get_all_predictions(
                 )
 
                 if spread_features and spread_features.features:
-                    # Get spread prediction
+                    # Fetch DraftKings spread line FIRST - needed for proper home_cover_prob
+                    dk_spread = await _fetch_draftkings_spread(app_state, home_team, away_team)
+                    dk_line = dk_spread.get("line") if dk_spread else None
+
+                    # Get spread prediction WITH the line for proper home_cover_prob
+                    # Without line, home_cover_prob defaults to 0.5 and edge is always 0
                     logger.info(f"Built spread features for {gid}: {len(spread_features.features)} features")
                     spread_prediction = spread_model.predict_game(
                         features=spread_features.features,
                         game_id=gid,
                         home_team=home_team,
                         away_team=away_team,
-                        line=None,  # No line yet, will add DK line below
+                        line=dk_line,  # Pass line for proper home_cover_prob calculation
                     )
 
                     spread_pred = round(spread_prediction.predicted_spread, 1)
-
-                    # Fetch DraftKings spread line
-                    dk_spread = await _fetch_draftkings_spread(app_state, home_team, away_team)
 
                     # Calculate betting recommendation if DK line available
                     recommendation = None
@@ -724,7 +726,7 @@ async def get_all_predictions(
                     if dk_spread:
                         recommendation, edge, bet_confidence = _calculate_spread_edge(
                             predicted_spread=spread_prediction.predicted_spread,
-                            vegas_line=dk_spread.get("line"),
+                            vegas_line=dk_line,
                             home_cover_prob=spread_prediction.home_cover_prob,
                         )
 
@@ -735,7 +737,7 @@ async def get_all_predictions(
                         confidence_high=round(spread_prediction.confidence_upper, 1),
                         home_cover_prob=round(spread_prediction.home_cover_prob, 3),
                         away_cover_prob=round(spread_prediction.away_cover_prob, 3),
-                        dk_line=dk_spread.get("line") if dk_spread else None,
+                        dk_line=dk_line,
                         dk_home_odds=dk_spread.get("home_odds") if dk_spread else None,
                         dk_away_odds=dk_spread.get("away_odds") if dk_spread else None,
                         recommendation=recommendation,
@@ -743,7 +745,7 @@ async def get_all_predictions(
                         bet_confidence=bet_confidence,
                     )
 
-                    logger.info(f"Spread prediction for {gid}: {spread_pred} (DK: {dk_spread.get('line') if dk_spread else 'N/A'})")
+                    logger.info(f"Spread prediction for {gid}: {spread_pred} (DK: {dk_line or 'N/A'}, home_cover_prob: {spread_prediction.home_cover_prob:.3f})")
 
                 else:
                     logger.warning(f"Spread features NULL or EMPTY for {gid} - cannot generate prediction")
@@ -1106,18 +1108,22 @@ async def get_game_predictions(
             )
 
             if spread_features and spread_features.features:
+                # Fetch DraftKings spread line FIRST - needed for proper home_cover_prob
+                dk_spread = await _fetch_draftkings_spread(app_state, home_team, away_team)
+                dk_line = dk_spread.get("line") if dk_spread else None
+
+                # Get spread prediction WITH the line for proper home_cover_prob
+                # Without line, home_cover_prob defaults to 0.5 and edge is always 0
                 logger.info(f"[{game_id}] Built spread features: {len(spread_features.features)} features")
                 spread_prediction = spread_model.predict_game(
                     features=spread_features.features,
                     game_id=gid,
                     home_team=home_team,
                     away_team=away_team,
-                    line=None,
+                    line=dk_line,  # Pass line for proper home_cover_prob calculation
                 )
 
                 spread_pred = round(spread_prediction.predicted_spread, 1)
-
-                dk_spread = await _fetch_draftkings_spread(app_state, home_team, away_team)
 
                 recommendation = None
                 edge = None
@@ -1126,7 +1132,7 @@ async def get_game_predictions(
                 if dk_spread:
                     recommendation, edge, bet_confidence = _calculate_spread_edge(
                         predicted_spread=spread_prediction.predicted_spread,
-                        vegas_line=dk_spread.get("line"),
+                        vegas_line=dk_line,
                         home_cover_prob=spread_prediction.home_cover_prob,
                     )
 
@@ -1137,7 +1143,7 @@ async def get_game_predictions(
                     confidence_high=round(spread_prediction.confidence_upper, 1),
                     home_cover_prob=round(spread_prediction.home_cover_prob, 3),
                     away_cover_prob=round(spread_prediction.away_cover_prob, 3),
-                    dk_line=dk_spread.get("line") if dk_spread else None,
+                    dk_line=dk_line,
                     dk_home_odds=dk_spread.get("home_odds") if dk_spread else None,
                     dk_away_odds=dk_spread.get("away_odds") if dk_spread else None,
                     recommendation=recommendation,
@@ -1145,7 +1151,7 @@ async def get_game_predictions(
                     bet_confidence=bet_confidence,
                 )
 
-                logger.info(f"[{game_id}] Spread prediction: {spread_pred}")
+                logger.info(f"[{game_id}] Spread prediction: {spread_pred} (DK: {dk_line or 'N/A'}, home_cover_prob: {spread_prediction.home_cover_prob:.3f})")
             else:
                 logger.warning(f"[{game_id}] Spread features NULL or EMPTY - cannot generate prediction")
 

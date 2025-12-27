@@ -275,22 +275,27 @@ class ValueDetector:
                 logger.debug(f"No features for game {game_id}")
                 continue
 
-            # Get model prediction
-            try:
-                prediction = self.spread_model.predict_game(
-                    features=game_features,
-                    game_id=game_id,
-                    home_team=game.get("home_team", ""),
-                    away_team=game.get("away_team", ""),
-                )
-            except Exception as e:
-                logger.warning(f"Failed to predict {game_id}: {e}")
-                continue
-
             # Find odds for this game
             game_odds = [o for o in odds_data if o.get("game_id") == game_id]
 
             for odds in game_odds:
+                # Get spread line from odds - CRITICAL for proper edge calculation
+                # Without the line, home_cover_prob defaults to 0.5 and edge is always 0
+                spread_line = odds.get("home_spread")
+
+                # Get model prediction WITH the line
+                try:
+                    prediction = self.spread_model.predict_game(
+                        features=game_features,
+                        game_id=game_id,
+                        home_team=game.get("home_team", ""),
+                        away_team=game.get("away_team", ""),
+                        line=spread_line,  # Pass line for proper home_cover_prob
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to predict {game_id}: {e}")
+                    continue
+
                 # Check home spread
                 home_bet = self._evaluate_spread_bet(
                     prediction=prediction,
