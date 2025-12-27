@@ -166,7 +166,7 @@ async def debug_value_detection(request: Request) -> dict[str, Any]:
     logger = logging.getLogger(__name__)
 
     debug_info = {
-        "code_version": "v8-edge-calc-test",  # Added edge_test to debug endpoint
+        "code_version": "v9-full-scan-test",  # Test full scan_spreads flow
         "pipeline_initialized": app_state.pipeline is not None,
         "feature_pipeline_initialized": app_state.feature_pipeline is not None,
         "value_detector_initialized": app_state.value_detector is not None,
@@ -362,6 +362,33 @@ async def debug_value_detection(request: Request) -> dict[str, Any]:
                                             "home_passes": edge_home >= app_state.value_detector.min_edge,
                                             "away_passes": edge_away >= app_state.value_detector.min_edge,
                                         }
+
+                                # FULL SCAN TEST: Run scan_spreads with features for ONE game
+                                # This tests the actual code path used by the scheduler
+                                if test_features and hasattr(test_features, 'features') and transformed:
+                                    # Build features dict for the test game
+                                    test_features_dict = {test_game_id: test_features.features}
+
+                                    # Run actual scan_spreads
+                                    scan_result = app_state.value_detector.scan_spreads(
+                                        games=[test_game],
+                                        odds_data=transformed,  # All transformed odds
+                                        features=test_features_dict,
+                                    )
+
+                                    debug_info["scan_test"] = {
+                                        "games_scanned": scan_result.games_scanned,
+                                        "value_bets_found": len(scan_result.value_bets),
+                                        "bets": [
+                                            {
+                                                "game_id": b.game_id,
+                                                "description": b.description,
+                                                "edge": round(b.edge, 4),
+                                                "ev": round(b.expected_value, 4),
+                                            }
+                                            for b in scan_result.value_bets[:3]
+                                        ]
+                                    }
                             else:
                                 debug_info["feature_test"]["status"] = "failed"
                                 debug_info["feature_test"]["error"] = "build_spread_features returned None"
