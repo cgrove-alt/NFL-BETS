@@ -27,6 +27,18 @@ from sklearn.model_selection import train_test_split, TimeSeriesSplit
 from sklearn.feature_selection import VarianceThreshold, SelectKBest, f_regression
 from sklearn.preprocessing import StandardScaler
 
+# NFL Key Numbers for spread betting
+# Games frequently land on these margins, affecting cover probability
+NFL_KEY_NUMBERS = {
+    3: 0.15,   # Field goal - most common margin (~15% of games)
+    7: 0.10,   # TD - second most common (~10% of games)
+    10: 0.05,  # TD + FG
+    6: 0.04,   # Two FGs
+    14: 0.04,  # Two TDs
+    4: 0.03,   # FG + safety or 2-pt
+    17: 0.03,  # TD + TD + FG
+}
+
 try:
     import optuna
     from optuna.samplers import TPESampler
@@ -544,34 +556,35 @@ class SpreadModel(BaseModel):
         self,
         X_val: np.ndarray,
         y_val: np.ndarray,
+        t_df: int = 7,  # Use same t-distribution as predict_proba
     ) -> None:
-        """Fit probability calibrator on validation data."""
+        """
+        Fit probability calibrator on validation data.
+
+        Uses t-distribution (df=7) to match predict_proba implementation.
+        """
         self.logger.debug("Fitting probability calibrator...")
 
         # Generate spread predictions
         preds = self._ensemble_predict(X_val)
+        residual_std = max(self._residual_std, 0.1)
 
-        # Create synthetic lines at various points for calibration
-        # Use actual spread as "line" to get cover outcomes
-        lines = y_val  # If predicted > actual, home covered
-
-        # Calculate raw cover probabilities
-        z_scores = (preds - lines) / max(self._residual_std, 0.1)
-        raw_probs = stats.norm.cdf(z_scores)
-
-        # Binary outcomes: did home team cover?
-        covers = (y_val > lines).astype(float)  # Always 0.5 since lines = y_val
-
-        # Create calibration data by using different "lines"
-        # Add noise to create varied outcomes
+        # Create calibration data by using different synthetic "lines"
+        # This generates varied outcomes for calibration training
         all_probs = []
         all_outcomes = []
 
-        for offset in [-7, -3.5, 0, 3.5, 7]:
+        # Use key numbers as offsets for more realistic calibration
+        for offset in [-7, -3.5, -3, 0, 3, 3.5, 7]:
             synthetic_lines = y_val + offset
-            z = (preds - synthetic_lines) / max(self._residual_std, 0.1)
-            probs = stats.norm.cdf(z)
+            scaled_diff = (preds - synthetic_lines) / residual_std
+
+            # Use t-distribution (same as predict_proba)
+            probs = stats.t.cdf(scaled_diff, df=t_df)
+
+            # Binary outcomes: did home team cover the synthetic line?
             outcomes = (y_val > synthetic_lines).astype(float)
+
             all_probs.extend(probs)
             all_outcomes.extend(outcomes)
 
@@ -632,13 +645,29 @@ class SpreadModel(BaseModel):
         self,
         X: Union[pl.DataFrame, np.ndarray],
         lines: Optional[np.ndarray] = None,
+        use_key_number_adjustment: bool = True,
+        use_t_distribution: bool = True,
+        t_df: int = 7,  # Degrees of freedom for t-distribution
     ) -> np.ndarray:
         """
-        Predict home team cover probabilities.
+        Predict home team cover probabilities with key number adjustment.
+
+        CRITICAL IMPROVEMENTS:
+        1. Uses t-distribution (df=7) instead of normal distribution
+           - Heavier tails better capture NFL score variance
+           - Normal underestimates probability of extreme outcomes
+
+        2. Key number adjustment for lines near 3 or 7
+           - Games land on 3 (field goal) ~15% of the time
+           - Games land on 7 (touchdown) ~10% of the time
+           - Crossing these numbers significantly changes cover probability
 
         Args:
             X: Feature matrix
             lines: Betting lines (if None, uses predicted spreads)
+            use_key_number_adjustment: Apply adjustment for key numbers
+            use_t_distribution: Use t-distribution instead of normal
+            t_df: Degrees of freedom for t-distribution (lower = heavier tails)
 
         Returns:
             Array of home cover probabilities
@@ -654,15 +683,111 @@ class SpreadModel(BaseModel):
         if lines is None:
             lines = predictions  # 50% cover prob when line = prediction
 
-        # Calculate raw probabilities
-        z_scores = (predictions - lines) / max(self._residual_std, 0.1)
-        raw_probs = stats.norm.cdf(z_scores)
+        # Ensure lines is an array
+        lines = np.atleast_1d(lines)
+
+        # Calculate scaled differences
+        residual_std = max(self._residual_std, 0.1)
+        scaled_diff = (predictions - lines) / residual_std
+
+        # Use t-distribution for heavier tails (better for NFL)
+        # NFL score distributions have more variance than normal suggests
+        if use_t_distribution:
+            raw_probs = stats.t.cdf(scaled_diff, df=t_df)
+        else:
+            raw_probs = stats.norm.cdf(scaled_diff)
+
+        # Apply key number adjustment
+        if use_key_number_adjustment:
+            raw_probs = self._apply_key_number_adjustment(
+                raw_probs, predictions, lines, residual_std
+            )
 
         # Apply calibration if available
         if self.calibrator is not None:
             return self.calibrator.calibrate(raw_probs)
 
         return raw_probs
+
+    def _apply_key_number_adjustment(
+        self,
+        probs: np.ndarray,
+        predictions: np.ndarray,
+        lines: np.ndarray,
+        residual_std: float,
+    ) -> np.ndarray:
+        """
+        Adjust cover probabilities for NFL key numbers.
+
+        Key numbers (3, 7, etc.) represent common final margins.
+        When lines are near these numbers, cover probability
+        changes non-linearly because:
+        - If line is 2.5, ~15% of outcomes land exactly on 3
+        - If line is 3.5, those 3-point wins become losses
+        - This creates a ~7.5% swing in cover probability
+
+        Args:
+            probs: Raw cover probabilities
+            predictions: Model predicted spreads
+            lines: Betting lines
+            residual_std: Model residual standard deviation
+
+        Returns:
+            Adjusted probabilities
+        """
+        adjusted_probs = probs.copy()
+
+        for i, (pred, line) in enumerate(zip(predictions, lines)):
+            # Check proximity to each key number
+            for key_num, frequency in NFL_KEY_NUMBERS.items():
+                # Calculate adjustment based on whether line crosses key number
+                # relative to our prediction
+
+                # Distance from prediction to key number
+                pred_to_key = pred - key_num
+
+                # Check if line is on opposite side of key number from prediction
+                # This is when key number adjustment matters most
+                line_to_key = line - key_num
+
+                # If prediction and line are on opposite sides of key number
+                # AND we're close to the key number, adjust probability
+                if np.sign(pred_to_key) != np.sign(line_to_key):
+                    # How close is the line to the key number?
+                    key_proximity = abs(line_to_key)
+
+                    if key_proximity <= 1.0:
+                        # Adjustment factor: higher when closer to key number
+                        # Max adjustment is half the frequency
+                        # (since key number could go either way)
+                        adjustment_factor = frequency * 0.5 * (1.0 - key_proximity)
+
+                        # If prediction suggests we're on winning side of key,
+                        # we get extra probability from games landing on key
+                        if pred > line:
+                            adjusted_probs[i] += adjustment_factor
+                        else:
+                            adjusted_probs[i] -= adjustment_factor
+
+                # Also check for negative key numbers (other team winning)
+                pred_to_neg_key = pred - (-key_num)
+                line_to_neg_key = line - (-key_num)
+
+                if np.sign(pred_to_neg_key) != np.sign(line_to_neg_key):
+                    key_proximity = abs(line_to_neg_key)
+
+                    if key_proximity <= 1.0:
+                        adjustment_factor = frequency * 0.5 * (1.0 - key_proximity)
+
+                        if pred > line:
+                            adjusted_probs[i] += adjustment_factor
+                        else:
+                            adjusted_probs[i] -= adjustment_factor
+
+        # Clip to valid probability range
+        adjusted_probs = np.clip(adjusted_probs, 0.01, 0.99)
+
+        return adjusted_probs
 
     def predict_with_confidence(
         self,
