@@ -62,7 +62,11 @@ except ImportError:
     lgb = None
 
 from .base import BaseModel, ModelMetadata, ModelMetrics, PredictionResult
-from .calibration import ProbabilityCalibrator
+from .calibration import (
+    ProbabilityCalibrator,
+    CalibrationDiagnostics,
+    ABSTAIN_CONFIDENCE_THRESHOLD,
+)
 
 
 @dataclass
@@ -92,6 +96,10 @@ class SpreadPrediction:
     # Metadata
     model_version: str = ""
     prediction_time: datetime = None
+
+    # Honesty layer fields
+    abstain: bool = False
+    calibration_confidence: Optional[float] = None
 
     def __post_init__(self):
         if self.prediction_time is None:
@@ -126,6 +134,8 @@ class SpreadPrediction:
             "confidence": self.confidence,
             "model_version": self.model_version,
             "prediction_time": self.prediction_time.isoformat(),
+            "abstain": self.abstain,
+            "calibration_confidence": self.calibration_confidence,
         }
 
 
@@ -238,6 +248,7 @@ class SpreadModel(BaseModel):
 
         # Calibrator for cover probabilities
         self.calibrator: Optional[ProbabilityCalibrator] = None
+        self._calibration_diagnostics: Optional[CalibrationDiagnostics] = None
 
         # Feature selection components
         self.variance_selector: Optional[VarianceThreshold] = None
@@ -295,21 +306,24 @@ class SpreadModel(BaseModel):
             X_arr = self._fit_feature_selection(X_arr, y_arr)
             self.logger.info(f"After feature selection: {X_arr.shape[1]} features retained")
 
-        # TIME-SERIES SPLIT: Use last 20% chronologically for validation
+        # TIME-SERIES SPLIT: 70% train / 15% validation / 15% calibration
         # CRITICAL: No shuffling, no stratification - pure temporal split
         if validation_data is None:
             n_samples = len(y_arr)
-            split_idx = int(n_samples * 0.8)  # 80% train, 20% validation
+            train_end = int(n_samples * 0.70)
+            val_end = int(n_samples * 0.85)
 
             # Strictly chronological split - NO randomness
-            X_train = X_arr[:split_idx]
-            y_train = y_arr[:split_idx]
-            X_val = X_arr[split_idx:]
-            y_val = y_arr[split_idx:]
+            X_train = X_arr[:train_end]
+            y_train = y_arr[:train_end]
+            X_val = X_arr[train_end:val_end]
+            y_val = y_arr[train_end:val_end]
+            X_cal = X_arr[val_end:]
+            y_cal = y_arr[val_end:]
 
             self.logger.info(
-                f"Time-series split: {len(y_train)} train / {len(y_val)} validation "
-                f"(last {100 * len(y_val) / n_samples:.1f}% for validation)"
+                f"Time-series split: {len(y_train)} train / {len(y_val)} validation / "
+                f"{len(y_cal)} calibration (70/15/15)"
             )
         else:
             X_train, y_train = X_arr, y_arr
@@ -356,9 +370,17 @@ class SpreadModel(BaseModel):
         self._residual_std = float(np.std(residuals))
         self.logger.info(f"Residual std: {self._residual_std:.2f} points")
 
-        # Fit calibrator if requested
+        # Fit calibrator if requested - use calibration set if available
         if fit_calibrator and self.use_calibration:
-            self._fit_calibrator(X_val, y_val)
+            # Use separate calibration set if we did the 70/15/15 split
+            if validation_data is None:
+                # X_cal and y_cal were created in the 70/15/15 split above
+                self._fit_calibrator(X_cal, y_cal)
+                self._compute_calibration_diagnostics(X_cal, y_cal)
+            else:
+                # External validation data provided - use it for calibration
+                self._fit_calibrator(X_val, y_val)
+                self._compute_calibration_diagnostics(X_val, y_val)
 
         self.is_fitted = True
 
@@ -378,6 +400,10 @@ class SpreadModel(BaseModel):
             },
             metrics=self.evaluate(X_val, y_val),
             calibrated=self.calibrator is not None,
+            calibration_diagnostics=(
+                self._calibration_diagnostics.to_dict()
+                if self._calibration_diagnostics else None
+            ),
         )
 
         self.logger.info("Spread model training complete")
@@ -590,6 +616,57 @@ class SpreadModel(BaseModel):
 
         self.calibrator = ProbabilityCalibrator(method="isotonic")
         self.calibrator.fit(np.array(all_probs), np.array(all_outcomes))
+
+    def _compute_calibration_diagnostics(
+        self,
+        X_cal: np.ndarray,
+        y_cal: np.ndarray,
+        t_df: int = 7,
+    ) -> None:
+        """
+        Compute calibration diagnostics on calibration set.
+
+        Uses the calibrator's get_diagnostics method to compute ECE, MCE,
+        Brier score, and log loss.
+        """
+        if self.calibrator is None:
+            return
+
+        # Generate predictions
+        preds = self._ensemble_predict(X_cal)
+        residual_std = max(self._residual_std, 0.1)
+
+        # Generate calibration data similar to _fit_calibrator
+        all_probs = []
+        all_outcomes = []
+
+        for offset in [-7, -3.5, -3, 0, 3, 3.5, 7]:
+            synthetic_lines = y_cal + offset
+            scaled_diff = (preds - synthetic_lines) / residual_std
+            probs = stats.t.cdf(scaled_diff, df=t_df)
+            outcomes = (y_cal > synthetic_lines).astype(float)
+
+            all_probs.extend(probs)
+            all_outcomes.extend(outcomes)
+
+        probs_arr = np.array(all_probs)
+        outcomes_arr = np.array(all_outcomes)
+
+        # Calibrate the probabilities
+        calibrated_probs = self.calibrator.calibrate(probs_arr)
+
+        # Get diagnostics from calibrator
+        self._calibration_diagnostics = self.calibrator.get_diagnostics(
+            calibrated_probs, outcomes_arr
+        )
+
+        if self._calibration_diagnostics:
+            self.logger.info(
+                f"Calibration diagnostics: ECE={self._calibration_diagnostics.ece:.4f}, "
+                f"MCE={self._calibration_diagnostics.mce:.4f}, "
+                f"Brier={self._calibration_diagnostics.brier_score:.4f}, "
+                f"well_calibrated={self._calibration_diagnostics.is_well_calibrated}"
+            )
 
     def _ensemble_predict(self, X: np.ndarray) -> np.ndarray:
         """Make ensemble predictions."""
@@ -886,6 +963,21 @@ class SpreadModel(BaseModel):
             # Edge = predicted prob - implied prob (50% at fair line)
             edge = home_cover_prob - 0.5
 
+        # Calculate calibration confidence (distance from 0.5)
+        calibration_confidence = max(home_cover_prob, 1 - home_cover_prob)
+
+        # Check if we should abstain from this prediction
+        abstain = False
+        if self.calibrator is not None:
+            last_ece = None
+            if self._calibration_diagnostics:
+                last_ece = self._calibration_diagnostics.ece
+            abstain = self.calibrator.should_abstain(
+                home_cover_prob,
+                confidence_threshold=ABSTAIN_CONFIDENCE_THRESHOLD,
+                last_ece=last_ece,
+            )
+
         return SpreadPrediction(
             game_id=game_id,
             home_team=home_team,
@@ -899,6 +991,8 @@ class SpreadModel(BaseModel):
             betting_line=line,
             edge=edge,
             model_version=self.VERSION,
+            abstain=abstain,
+            calibration_confidence=calibration_confidence,
         )
 
     def get_feature_importance(self) -> dict[str, float]:
@@ -1190,6 +1284,7 @@ class SpreadModel(BaseModel):
             "lgb_model": self.lgb_model,
             "ridge_model": self.ridge_model,
             "calibrator": self.calibrator,
+            "calibration_diagnostics": self._calibration_diagnostics,
             "residual_std": self._residual_std,
             "feature_names": self.feature_names,
             "metadata": self.metadata,
@@ -1221,6 +1316,7 @@ class SpreadModel(BaseModel):
         self.lgb_model = save_dict["lgb_model"]
         self.ridge_model = save_dict["ridge_model"]
         self.calibrator = save_dict["calibrator"]
+        self._calibration_diagnostics = save_dict.get("calibration_diagnostics")
         self._residual_std = save_dict["residual_std"]
         self.feature_names = save_dict["feature_names"]
         self.metadata = save_dict.get("metadata")

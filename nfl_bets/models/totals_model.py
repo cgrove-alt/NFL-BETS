@@ -39,7 +39,11 @@ except ImportError:
     lgb = None
 
 from .base import BaseModel, ModelMetadata, ModelMetrics, PredictionResult
-from .calibration import ProbabilityCalibrator
+from .calibration import (
+    ProbabilityCalibrator,
+    CalibrationDiagnostics,
+    ABSTAIN_CONFIDENCE_THRESHOLD,
+)
 
 
 @dataclass
@@ -82,6 +86,10 @@ class TotalsPrediction:
     # Metadata
     model_version: str = ""
     prediction_time: datetime = None
+
+    # Honesty layer fields
+    abstain: bool = False
+    calibration_confidence: Optional[float] = None
 
     def __post_init__(self):
         if self.prediction_time is None:
@@ -147,6 +155,8 @@ class TotalsPrediction:
             "iqr": self.iqr,
             "model_version": self.model_version,
             "prediction_time": self.prediction_time.isoformat(),
+            "abstain": self.abstain,
+            "calibration_confidence": self.calibration_confidence,
         }
 
 
@@ -222,6 +232,7 @@ class TotalsModel(BaseModel):
 
         # Calibrator
         self.calibrator: Optional[ProbabilityCalibrator] = None
+        self._calibration_diagnostics: Optional[CalibrationDiagnostics] = None
 
         # Track prediction statistics
         self._residual_std: float = 10.0  # Default NFL totals std
@@ -303,6 +314,7 @@ class TotalsModel(BaseModel):
         # Fit calibrator on CALIBRATION SET (not validation) to prevent leakage
         if fit_calibrator and self.use_calibration:
             self._fit_calibrator(X_cal, y_cal)
+            self._compute_calibration_diagnostics(X_cal, y_cal)
 
         self.is_fitted = True
 
@@ -320,6 +332,10 @@ class TotalsModel(BaseModel):
             },
             metrics=self.evaluate(X_val, y_val),
             calibrated=self.calibrator is not None,
+            calibration_diagnostics=(
+                self._calibration_diagnostics.to_dict()
+                if self._calibration_diagnostics else None
+            ),
         )
 
         self.logger.info("Totals model training complete")
@@ -386,6 +402,50 @@ class TotalsModel(BaseModel):
 
         self.calibrator = ProbabilityCalibrator(method="isotonic")
         self.calibrator.fit(np.array(all_probs), np.array(all_outcomes))
+
+    def _compute_calibration_diagnostics(
+        self,
+        X_cal: np.ndarray,
+        y_cal: np.ndarray,
+    ) -> None:
+        """
+        Compute calibration diagnostics on calibration set.
+        """
+        if self.calibrator is None:
+            return
+
+        # Generate predictions
+        median_preds = self._quantile_models[0.5].predict(X_cal)
+
+        # Generate calibration data similar to _fit_calibrator
+        all_probs = []
+        all_outcomes = []
+
+        for offset_pct in [0.85, 0.925, 1.0, 1.075, 1.15]:
+            synthetic_lines = median_preds * offset_pct
+            probs = self._calculate_over_prob_from_quantiles(X_cal, synthetic_lines)
+            outcomes = (y_cal > synthetic_lines).astype(float)
+            all_probs.extend(probs)
+            all_outcomes.extend(outcomes)
+
+        probs_arr = np.array(all_probs)
+        outcomes_arr = np.array(all_outcomes)
+
+        # Calibrate the probabilities
+        calibrated_probs = self.calibrator.calibrate(probs_arr)
+
+        # Get diagnostics from calibrator
+        self._calibration_diagnostics = self.calibrator.get_diagnostics(
+            calibrated_probs, outcomes_arr
+        )
+
+        if self._calibration_diagnostics:
+            self.logger.info(
+                f"Calibration diagnostics: ECE={self._calibration_diagnostics.ece:.4f}, "
+                f"MCE={self._calibration_diagnostics.mce:.4f}, "
+                f"Brier={self._calibration_diagnostics.brier_score:.4f}, "
+                f"well_calibrated={self._calibration_diagnostics.is_well_calibrated}"
+            )
 
     def _calculate_over_prob_from_quantiles(
         self,
@@ -644,6 +704,23 @@ class TotalsModel(BaseModel):
                 over_edge = over_prob - over_no_vig
                 under_edge = under_prob - under_no_vig
 
+        # Calculate calibration confidence (distance from 0.5)
+        calibration_confidence = None
+        if over_prob is not None:
+            calibration_confidence = max(over_prob, 1 - over_prob)
+
+        # Check if we should abstain from this prediction
+        abstain = False
+        if self.calibrator is not None and over_prob is not None:
+            last_ece = None
+            if self._calibration_diagnostics:
+                last_ece = self._calibration_diagnostics.ece
+            abstain = self.calibrator.should_abstain(
+                over_prob,
+                confidence_threshold=ABSTAIN_CONFIDENCE_THRESHOLD,
+                last_ece=last_ece,
+            )
+
         return TotalsPrediction(
             game_id=game_id,
             home_team=home_team,
@@ -665,6 +742,8 @@ class TotalsModel(BaseModel):
             over_edge=over_edge,
             under_edge=under_edge,
             model_version=self.VERSION,
+            abstain=abstain,
+            calibration_confidence=calibration_confidence,
         )
 
     @staticmethod
@@ -791,6 +870,7 @@ class TotalsModel(BaseModel):
             "quantile_models": self._quantile_models,
             "quantiles": self.quantiles,
             "calibrator": self.calibrator,
+            "calibration_diagnostics": self._calibration_diagnostics,
             "residual_std": self._residual_std,
             "feature_names": self.feature_names,
             "model_params": self.model_params,
@@ -818,6 +898,7 @@ class TotalsModel(BaseModel):
         self._quantile_models = save_dict["quantile_models"]
         self.quantiles = save_dict["quantiles"]
         self.calibrator = save_dict["calibrator"]
+        self._calibration_diagnostics = save_dict.get("calibration_diagnostics")
         self._residual_std = save_dict["residual_std"]
         self.feature_names = save_dict["feature_names"]
         self.model_params = save_dict.get("model_params", self.MODEL_PARAMS)

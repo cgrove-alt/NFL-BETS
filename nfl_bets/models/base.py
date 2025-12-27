@@ -153,6 +153,7 @@ class ModelMetadata:
     metrics: ModelMetrics
     calibrated: bool = False
     data_cutoff_date: Optional[datetime] = None  # Date of most recent game in training data
+    calibration_diagnostics: Optional[dict[str, Any]] = None  # ECE, MCE, Brier, log_loss, etc.
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -167,6 +168,7 @@ class ModelMetadata:
             "metrics": self.metrics.to_dict(),
             "calibrated": self.calibrated,
             "data_cutoff_date": self.data_cutoff_date.isoformat() if self.data_cutoff_date else None,
+            "calibration_diagnostics": self.calibration_diagnostics,
         }
 
     def is_stale(self, latest_game_date: datetime) -> bool:

@@ -48,7 +48,11 @@ except ImportError:
     lgb = None
 
 from .base import BaseModel, ModelMetadata, ModelMetrics, PredictionResult
-from .calibration import ProbabilityCalibrator
+from .calibration import (
+    ProbabilityCalibrator,
+    CalibrationDiagnostics,
+    ABSTAIN_CONFIDENCE_THRESHOLD,
+)
 
 
 @dataclass
@@ -82,6 +86,10 @@ class MoneylinePrediction:
     model_version: str = ""
     prediction_time: datetime = None
 
+    # Honesty layer fields
+    abstain: bool = False
+    calibration_confidence: Optional[float] = None
+
     def __post_init__(self):
         if self.prediction_time is None:
             self.prediction_time = datetime.now()
@@ -113,6 +121,8 @@ class MoneylinePrediction:
             "edge": self.edge,
             "model_version": self.model_version,
             "prediction_time": self.prediction_time.isoformat(),
+            "abstain": self.abstain,
+            "calibration_confidence": self.calibration_confidence,
         }
 
 
@@ -222,6 +232,7 @@ class MoneylineModel(BaseModel):
 
         # Calibrator for win probabilities
         self.calibrator: Optional[ProbabilityCalibrator] = None
+        self._calibration_diagnostics: Optional[CalibrationDiagnostics] = None
 
         self.logger = logger.bind(model="moneyline_classifier")
 
@@ -350,6 +361,17 @@ class MoneylineModel(BaseModel):
             f"ece={val_ece:.4f}, mce={val_mce:.4f}"
         )
 
+        # Store calibration diagnostics
+        self._calibration_diagnostics = CalibrationDiagnostics(
+            ece=val_ece,
+            mce=val_mce,
+            brier_score=val_brier,
+            log_loss=val_log_loss,
+            n_calibration_samples=len(y_val),
+            calibration_method="isotonic" if self.calibrator else "none",
+            is_well_calibrated=val_ece < 0.05,
+        )
+
         # Create metadata
         self.metadata = ModelMetadata(
             model_type=self.MODEL_TYPE,
@@ -380,6 +402,10 @@ class MoneylineModel(BaseModel):
                 n_samples=len(y_arr),
             ),
             calibrated=self.calibrator is not None,
+            calibration_diagnostics=(
+                self._calibration_diagnostics.to_dict()
+                if self._calibration_diagnostics else None
+            ),
         )
 
         self.logger.info("Moneyline model training complete")
@@ -602,6 +628,21 @@ class MoneylineModel(BaseModel):
             home_edge = home_win_prob - home_no_vig
             away_edge = away_win_prob - away_no_vig
 
+        # Calculate calibration confidence (distance from 0.5)
+        calibration_confidence = max(home_win_prob, away_win_prob)
+
+        # Check if we should abstain from this prediction
+        abstain = False
+        if self.calibrator is not None:
+            last_ece = None
+            if self._calibration_diagnostics:
+                last_ece = self._calibration_diagnostics.ece
+            abstain = self.calibrator.should_abstain(
+                home_win_prob,
+                confidence_threshold=ABSTAIN_CONFIDENCE_THRESHOLD,
+                last_ece=last_ece,
+            )
+
         return MoneylinePrediction(
             game_id=game_id,
             home_team=home_team,
@@ -616,6 +657,8 @@ class MoneylineModel(BaseModel):
             home_edge=home_edge,
             away_edge=away_edge,
             model_version=self.VERSION,
+            abstain=abstain,
+            calibration_confidence=calibration_confidence,
         )
 
     @staticmethod
@@ -906,6 +949,7 @@ class MoneylineModel(BaseModel):
             "lr_model": self.lr_model,
             "lr_scaler": getattr(self, "_lr_scaler", None),
             "calibrator": self.calibrator,
+            "calibration_diagnostics": self._calibration_diagnostics,
             "feature_names": self.feature_names,
             "metadata": self.metadata,
             "is_fitted": self.is_fitted,
@@ -937,6 +981,7 @@ class MoneylineModel(BaseModel):
         self.lr_model = save_dict["lr_model"]
         self._lr_scaler = save_dict.get("lr_scaler")
         self.calibrator = save_dict["calibrator"]
+        self._calibration_diagnostics = save_dict.get("calibration_diagnostics")
         self.feature_names = save_dict["feature_names"]
         self.metadata = save_dict.get("metadata")
         self.is_fitted = save_dict.get("is_fitted", True)

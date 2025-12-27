@@ -58,6 +58,75 @@ class CalibrationMetrics:
         return self.ece < 0.05
 
 
+# Default thresholds for honesty layer
+ABSTAIN_CONFIDENCE_THRESHOLD = 0.55  # Abstain if confidence < 55%
+POORLY_CALIBRATED_ECE_THRESHOLD = 0.15  # ECE > 15% = poorly calibrated
+
+
+@dataclass
+class CalibrationDiagnostics:
+    """
+    Calibration diagnostics for model transparency (honesty layer).
+
+    Exposes calibration quality metrics and provides abstention guidance.
+    """
+
+    # Core metrics
+    ece: float  # Expected Calibration Error
+    mce: float  # Maximum Calibration Error
+    brier_score: float
+    log_loss: float
+
+    # Sample info
+    n_calibration_samples: int
+
+    # Method info
+    calibration_method: str  # "isotonic", "platt", "beta"
+
+    # Quality flags
+    is_well_calibrated: bool  # ECE < 0.05
+
+    # Reliability curve data for visualization
+    reliability_curve: Optional[dict] = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "ece": self.ece,
+            "mce": self.mce,
+            "brier_score": self.brier_score,
+            "log_loss": self.log_loss,
+            "n_calibration_samples": self.n_calibration_samples,
+            "calibration_method": self.calibration_method,
+            "is_well_calibrated": self.is_well_calibrated,
+            "reliability_curve": self.reliability_curve,
+        }
+
+    @property
+    def is_poorly_calibrated(self) -> bool:
+        """Check if model is poorly calibrated (ECE > 15%)."""
+        return self.ece > POORLY_CALIBRATED_ECE_THRESHOLD
+
+    @classmethod
+    def from_metrics(
+        cls,
+        metrics: CalibrationMetrics,
+        method: str,
+        reliability_curve: Optional[dict] = None,
+    ) -> "CalibrationDiagnostics":
+        """Create diagnostics from CalibrationMetrics."""
+        return cls(
+            ece=metrics.ece,
+            mce=metrics.mce,
+            brier_score=metrics.brier_score,
+            log_loss=metrics.log_loss,
+            n_calibration_samples=metrics.n_samples,
+            calibration_method=method,
+            is_well_calibrated=metrics.is_well_calibrated,
+            reliability_curve=reliability_curve,
+        )
+
+
 class ProbabilityCalibrator:
     """
     Post-hoc probability calibration.
@@ -294,6 +363,68 @@ class ProbabilityCalibrator:
                 mce = max(mce, error)
 
         return float(ece), float(mce)
+
+    def should_abstain(
+        self,
+        calibrated_prob: float,
+        confidence_threshold: float = ABSTAIN_CONFIDENCE_THRESHOLD,
+        ece_threshold: float = POORLY_CALIBRATED_ECE_THRESHOLD,
+        last_ece: Optional[float] = None,
+    ) -> bool:
+        """
+        Determine if model should abstain from making a prediction.
+
+        Part of the "honesty layer" - models should decline predictions when:
+        1. Confidence is too close to 50% (coin flip)
+        2. Model calibration is poor (high ECE)
+
+        Args:
+            calibrated_prob: Calibrated probability (0-1)
+            confidence_threshold: Minimum confidence required (default 0.55)
+            ece_threshold: Maximum acceptable ECE (default 0.15)
+            last_ece: ECE from most recent evaluation (optional)
+
+        Returns:
+            True if model should abstain, False if prediction is confident enough
+        """
+        # Calculate confidence (distance from 0.5, mapped to 0.5-1.0)
+        confidence = max(calibrated_prob, 1 - calibrated_prob)
+
+        # Abstain if confidence below threshold
+        if confidence < confidence_threshold:
+            return True
+
+        # Abstain if model is poorly calibrated (if ECE provided)
+        if last_ece is not None and last_ece > ece_threshold:
+            return True
+
+        return False
+
+    def get_diagnostics(
+        self,
+        predicted_probs: np.ndarray,
+        actual_outcomes: np.ndarray,
+        n_bins: int = 10,
+    ) -> CalibrationDiagnostics:
+        """
+        Get full calibration diagnostics including reliability curve.
+
+        Args:
+            predicted_probs: Probabilities to evaluate
+            actual_outcomes: Binary actual outcomes
+            n_bins: Number of bins for ECE calculation
+
+        Returns:
+            CalibrationDiagnostics with all metrics and visualization data
+        """
+        metrics = self.evaluate(predicted_probs, actual_outcomes, n_bins)
+        reliability = reliability_diagram_data(predicted_probs, actual_outcomes, n_bins)
+
+        return CalibrationDiagnostics.from_metrics(
+            metrics=metrics,
+            method=self.method,
+            reliability_curve=reliability,
+        )
 
     def get_calibration_curve(
         self,
