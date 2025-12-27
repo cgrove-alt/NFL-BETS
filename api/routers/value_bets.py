@@ -166,7 +166,7 @@ async def debug_value_detection(request: Request) -> dict[str, Any]:
     logger = logging.getLogger(__name__)
 
     debug_info = {
-        "code_version": "v6-edge-fix",  # Fixed: pass line to predict_game for proper home_cover_prob
+        "code_version": "v7-lower-threshold",  # Lowered min_edge to 0.5% + debug logging
         "pipeline_initialized": app_state.pipeline is not None,
         "feature_pipeline_initialized": app_state.feature_pipeline is not None,
         "value_detector_initialized": app_state.value_detector is not None,

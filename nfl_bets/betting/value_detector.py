@@ -196,9 +196,10 @@ class ValueDetector:
         ...     print(bet.summary())
     """
 
-    # Default thresholds
-    DEFAULT_MIN_EDGE = 0.01  # 1% minimum edge
-    DEFAULT_MIN_EV = 0.005  # 0.5% minimum expected value
+    # Default thresholds - AGGRESSIVE to find bets in efficient markets
+    # The market is typically efficient, so we need low thresholds
+    DEFAULT_MIN_EDGE = 0.005  # 0.5% minimum edge (was 1%)
+    DEFAULT_MIN_EV = 0.002  # 0.2% minimum expected value (was 0.5%)
 
     # Urgency thresholds
     CRITICAL_EDGE = 0.08  # 8%
@@ -296,6 +297,14 @@ class ValueDetector:
                     logger.warning(f"Failed to predict {game_id}: {e}")
                     continue
 
+                # DEBUG: Log prediction details for first few games
+                logger.info(
+                    f"EDGE DEBUG [{game_id}]: line={spread_line}, "
+                    f"pred={prediction.predicted_spread:.1f}, "
+                    f"home_cover={prediction.home_cover_prob:.3f}, "
+                    f"diff={prediction.predicted_spread - (spread_line or 0):.1f}pts"
+                )
+
                 # Check home spread
                 home_bet = self._evaluate_spread_bet(
                     prediction=prediction,
@@ -304,6 +313,7 @@ class ValueDetector:
                     side="home",
                 )
                 if home_bet:
+                    logger.info(f"VALUE BET FOUND [{game_id}]: home edge={home_bet.edge:.2%}, ev={home_bet.expected_value:.2%}")
                     value_bets.append(home_bet)
 
                 # Check away spread
@@ -314,6 +324,7 @@ class ValueDetector:
                     side="away",
                 )
                 if away_bet:
+                    logger.info(f"VALUE BET FOUND [{game_id}]: away edge={away_bet.edge:.2%}, ev={away_bet.expected_value:.2%}")
                     value_bets.append(away_bet)
 
         # Sort by edge

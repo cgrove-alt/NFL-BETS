@@ -187,10 +187,17 @@ class AppState:
                     logger.warning(f"Prop model not found: {prop_type}")
 
             # Initialize value detector with spread and prop models
+            # Use aggressive thresholds to find bets in efficient markets
+            # Override settings to ensure we don't miss small edges
+            min_edge_setting = float(self.settings.value_detection.min_edge_threshold)
+            min_edge_used = min(min_edge_setting, 0.005)  # Never higher than 0.5%
+            logger.info(f"Value detection threshold: settings={min_edge_setting:.2%}, using={min_edge_used:.2%}")
+
             self.value_detector = ValueDetector(
                 spread_model=spread_model,
                 prop_models=prop_models,
-                min_edge=float(self.settings.value_detection.min_edge_threshold),
+                min_edge=min_edge_used,
+                min_ev=0.002,  # 0.2% min EV
             )
             logger.info(f"Value detector initialized with {len(prop_models)} prop models")
 
