@@ -269,6 +269,7 @@ async def debug_value_detection(request: Request) -> dict[str, Any]:
         if app_state.last_value_bets:
             debug_info["sample_value_bets"] = [
                 {
+                    "game_id": get_val(bet, 'game_id', ''),  # CRITICAL: Show game_id for matching debug
                     "description": get_val(bet, 'description', ''),
                     "edge": get_val(bet, 'edge', 0),
                     "model_probability": get_val(bet, 'model_probability', 0),

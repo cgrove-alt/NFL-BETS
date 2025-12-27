@@ -419,9 +419,13 @@ class AppState:
         next_sunday = now + timedelta(days=days_until_sunday)
         next_sunday = next_sunday.replace(hour=13, minute=0, second=0, microsecond=0)
 
+        # Dynamic season calculation: NFL season year is based on when season started
+        # Season starts in September, so if we're in Jan-Aug, use previous year
+        current_season = now.year if now.month >= 9 else now.year - 1
+
         fallback_bets = [
             FallbackValueBet(
-                game_id="2024_17_BAL_KC",
+                game_id=f"{current_season}_17_BAL_KC",
                 bet_type="spread",
                 description="KC -3.5",
                 model_probability=0.58,
@@ -438,7 +442,7 @@ class AppState:
                 expires_at=next_sunday,
             ),
             FallbackValueBet(
-                game_id="2024_17_DAL_SF",
+                game_id=f"{current_season}_17_DAL_SF",
                 bet_type="totals",
                 description="SF Over 24.5",
                 model_probability=0.55,
@@ -455,7 +459,7 @@ class AppState:
                 expires_at=next_sunday + timedelta(hours=1),
             ),
             FallbackValueBet(
-                game_id="2024_17_GB_DET",
+                game_id=f"{current_season}_17_GB_DET",
                 bet_type="moneyline",
                 description="DET ML",
                 model_probability=0.62,
@@ -489,34 +493,38 @@ class AppState:
         next_sunday = now + timedelta(days=days_until_sunday)
         next_sunday = next_sunday.replace(hour=13, minute=0, second=0, microsecond=0)
 
+        # Dynamic season calculation: NFL season year is based on when season started
+        # Season starts in September, so if we're in Jan-Aug, use previous year
+        current_season = now.year if now.month >= 9 else now.year - 1
+
         return [
             {
-                "game_id": "2024_17_BAL_KC",
+                "game_id": f"{current_season}_17_BAL_KC",
                 "home_team": "KC",
                 "away_team": "BAL",
                 "kickoff": next_sunday.isoformat(),
                 "week": 17,
-                "season": 2024,
+                "season": current_season,
                 "spread": -3.5,
                 "total": 47.5,
             },
             {
-                "game_id": "2024_17_DAL_SF",
+                "game_id": f"{current_season}_17_DAL_SF",
                 "home_team": "SF",
                 "away_team": "DAL",
                 "kickoff": (next_sunday + timedelta(hours=1)).isoformat(),
                 "week": 17,
-                "season": 2024,
+                "season": current_season,
                 "spread": -2.5,
                 "total": 49.0,
             },
             {
-                "game_id": "2024_17_GB_DET",
+                "game_id": f"{current_season}_17_GB_DET",
                 "home_team": "DET",
                 "away_team": "GB",
                 "kickoff": (next_sunday + timedelta(hours=2)).isoformat(),
                 "week": 17,
-                "season": 2024,
+                "season": current_season,
                 "spread": -4.0,
                 "total": 48.0,
             },

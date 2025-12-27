@@ -167,6 +167,43 @@ def _get_bet_edge(bet: Any) -> float:
         return 0.0
 
 
+def _game_ids_match(bet_game_id: str, query_game_id: str) -> bool:
+    """
+    Match game_ids even if season differs (2024 vs 2025).
+
+    Game ID format: YYYY_WW_AWAY_HOME (e.g., "2024_17_HOU_LAC")
+
+    This handles the common case where:
+    - Games from nflverse use one season year
+    - Value bets use a different season year
+    - But week + away + home teams are the same
+
+    Args:
+        bet_game_id: The game_id from the bet
+        query_game_id: The game_id being searched for
+
+    Returns:
+        True if the game IDs match (exact or fuzzy)
+    """
+    # Exact match - fast path
+    if bet_game_id == query_game_id:
+        return True
+
+    # Fuzzy match - compare week + teams, ignore season
+    try:
+        bet_parts = bet_game_id.split("_")
+        query_parts = query_game_id.split("_")
+
+        # Both must have at least 4 parts: YYYY_WW_AWAY_HOME
+        if len(bet_parts) >= 4 and len(query_parts) >= 4:
+            # Compare week, away team, home team (indices 1, 2, 3)
+            return bet_parts[1:4] == query_parts[1:4]
+    except Exception:
+        pass
+
+    return False
+
+
 def _build_demo_games(app_state) -> list[GameResponse]:
     """
     Build game responses from demo/mock data.
@@ -463,13 +500,13 @@ async def get_game_detail(
     is_demo = get_val(app_state, "_demo_mode", False)
 
     if is_demo and app_state._mock_games:
-        # Find game in mock data
+        # Find game in mock data using fuzzy matching
         for game in app_state._mock_games:
-            if get_val(game, "game_id", "") == game_id:
-                # Get bets for this game using universal accessor
+            if _game_ids_match(get_val(game, "game_id", ""), game_id):
+                # Get bets for this game using FUZZY matching
                 game_bets = [
                     bet for bet in app_state.last_value_bets
-                    if _get_bet_game_id(bet) == game_id
+                    if _game_ids_match(_get_bet_game_id(bet), game_id)
                 ]
 
                 # Format bets with game_id included
@@ -509,18 +546,18 @@ async def get_game_detail(
         fallback_games = app_state.get_fallback_games()
         fallback_bets = app_state.get_fallback_data()
 
-        # Find the specific game using universal accessor
+        # Find the specific game using FUZZY matching
         target_game = None
         for fg in fallback_games:
-            if get_val(fg, "game_id", "") == game_id:
+            if _game_ids_match(get_val(fg, "game_id", ""), game_id):
                 target_game = fg
                 break
 
         if target_game:
-            # Filter bets for this game using universal accessor
+            # Filter bets for this game using FUZZY matching
             game_bets = [
                 bet for bet in fallback_bets
-                if _get_bet_game_id(bet) == game_id
+                if _game_ids_match(_get_bet_game_id(bet), game_id)
             ]
 
             # Format bets with game_id included
@@ -561,12 +598,19 @@ async def get_game_detail(
         except Exception as e:
             logger.warning(f"Pipeline query failed for game {game_id}: {e}")
 
-    # Get value bets for this game using universal accessor
+    # Get value bets for this game using FUZZY matching (handles season mismatch)
     value_bets = app_state.last_value_bets
+
+    # Debug logging - show what we're trying to match
+    bet_game_ids = [_get_bet_game_id(bet) for bet in value_bets[:5]]
+    logger.info(f"[{game_id}] Looking for match in bet game_ids: {bet_game_ids}")
+
     game_bets = [
         bet for bet in value_bets
-        if _get_bet_game_id(bet) == game_id
+        if _game_ids_match(_get_bet_game_id(bet), game_id)
     ]
+
+    logger.info(f"[{game_id}] Found {len(game_bets)} matching bets using fuzzy matching")
 
     # =========================================================================
     # FALLBACK RECOVERY: If pipeline failed, reconstruct game from bets or fallback data
@@ -575,10 +619,10 @@ async def get_game_detail(
     if not game_data:
         logger.warning(f"🔄 Pipeline returned no data for game {game_id} - attempting fallback recovery")
 
-        # First, try to find game in fallback games
+        # First, try to find game in fallback games using FUZZY matching
         fallback_games = app_state.get_fallback_games()
         for fg in fallback_games:
-            if get_val(fg, "game_id", "") == game_id:
+            if _game_ids_match(get_val(fg, "game_id", ""), game_id):
                 logger.info(f"✅ Found game {game_id} in fallback games")
                 # Create synthetic game object from fallback data
                 game_data = type("SyntheticGame", (), {
