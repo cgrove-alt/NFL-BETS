@@ -214,12 +214,9 @@ class SchedulerOrchestrator:
         """
         from nfl_bets.scheduler.jobs import poll_odds
 
-        # Check if in active hours
-        now = datetime.now()
-        sched = self.settings.scheduler
-        if not (sched.active_hours_start <= now.hour < sched.active_hours_end):
-            logger.debug(f"Outside active hours ({sched.active_hours_start}-{sched.active_hours_end})")
-            return
+        # NOTE: Active hours check removed for now - we want to poll 24/7
+        # The scheduler interval already controls how often we poll
+        # TODO: Re-enable if API costs become a concern
 
         # Run the polling job
         value_bets = await poll_odds(

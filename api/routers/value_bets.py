@@ -166,7 +166,7 @@ async def debug_value_detection(request: Request) -> dict[str, Any]:
     logger = logging.getLogger(__name__)
 
     debug_info = {
-        "code_version": "v11-no-ev-check",  # Removed EV threshold check (vig makes small edge EV negative)
+        "code_version": "v12-no-hours-check",  # Removed active hours check (was blocking at 4am UTC)
         "pipeline_initialized": app_state.pipeline is not None,
         "feature_pipeline_initialized": app_state.feature_pipeline is not None,
         "value_detector_initialized": app_state.value_detector is not None,
