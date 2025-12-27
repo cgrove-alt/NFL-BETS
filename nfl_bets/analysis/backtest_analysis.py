@@ -305,7 +305,8 @@ class SeasonalBacktester:
         try:
             # Build training and test datasets using the feature pipeline
             if model_type in ["spread", "moneyline", "totals", "total"]:
-                target = "spread" if model_type == "spread" else model_type
+                # Both spread and moneyline use spread data (moneyline converts to binary)
+                target = "spread" if model_type in ["spread", "moneyline"] else "total"
                 train_df = await feature_pipeline.build_training_dataset(
                     seasons=train_seasons,
                     target=target,
@@ -337,6 +338,11 @@ class SeasonalBacktester:
             X_test = test_df.select(feature_cols)
             y_test = test_df[target_col]
 
+            # For moneyline, convert spread to binary (home_win = spread > 0)
+            if model_type == "moneyline":
+                y_train = pl.Series((y_train.to_numpy() > 0).astype(int))
+                y_test = pl.Series((y_test.to_numpy() > 0).astype(int))
+
             if len(X_train) == 0 or len(X_test) == 0:
                 self.logger.warning(f"No data for season {test_season}")
                 return None
@@ -345,11 +351,19 @@ class SeasonalBacktester:
             model = self._create_model(model_type)
             model.train(X_train, y_train)
 
-            # Evaluate
-            predictions = model.predict(X_test)
+            # Evaluate - use predict_proba for moneyline (returns probabilities)
+            if model_type == "moneyline":
+                predictions = model.predict_proba(X_test)
+            else:
+                predictions = model.predict(X_test)
 
             # Calculate metrics
-            errors = np.abs(y_test.to_numpy() - predictions)
+            if model_type == "moneyline":
+                # For moneyline, convert probs to binary for MAE calc
+                pred_binary = (predictions > 0.5).astype(int)
+                errors = np.abs(y_test.to_numpy() - pred_binary)
+            else:
+                errors = np.abs(y_test.to_numpy() - predictions)
             mae = float(np.mean(errors))
             rmse = float(np.sqrt(np.mean(errors ** 2)))
 
@@ -360,6 +374,7 @@ class SeasonalBacktester:
                 model=model,
                 X_test=X_test,
                 test_season=test_season,
+                model_type=model_type,
             )
 
             if not bets:
@@ -425,6 +440,7 @@ class SeasonalBacktester:
         model,
         X_test: pl.DataFrame,
         test_season: int,
+        model_type: str = "spread",
     ) -> tuple[list[dict], list[dict]]:
         """Simulate bets and calculate edges."""
         bets = []
@@ -434,46 +450,76 @@ class SeasonalBacktester:
         weeks = X_test["week"].to_numpy() if "week" in X_test.columns else np.ones(len(predictions))
 
         for i, (pred, actual, week) in enumerate(zip(predictions, actuals, weeks)):
-            # Estimate edge based on prediction confidence
-            # For spread model, edge = abs(pred - market_line) / 10
-            # We simulate market line as actual + noise
-            market_line = actual + np.random.normal(0, 2)
-            diff = abs(pred - market_line)
-            edge = min(diff / 10, 0.15)
+            if model_type == "moneyline":
+                # For moneyline: predictions are probabilities (0-1), actuals are binary (0/1)
+                # Edge = how far prediction is from 0.5
+                edge = abs(pred - 0.5)
 
-            if edge >= self.min_edge:
-                # Determine bet direction
-                bet_home = pred < market_line
+                if edge >= self.min_edge:
+                    # Bet on home if predicted prob > 0.5
+                    bet_home = pred > 0.5
 
-                # Determine outcome
-                if bet_home:
-                    won = actual < market_line
-                else:
-                    won = actual > market_line
+                    # Won if bet direction matches actual outcome
+                    if bet_home:
+                        won = actual == 1  # Home team won
+                    else:
+                        won = actual == 0  # Away team won
 
-                # Calculate profit
-                if won:
-                    profit = self.stake_per_bet * (100 / 110)
-                else:
-                    profit = -self.stake_per_bet
+                    # Calculate profit (standard -110 odds)
+                    if won:
+                        profit = self.stake_per_bet * (100 / 110)
+                    else:
+                        profit = -self.stake_per_bet
 
-                bets.append({
-                    "week": int(week),
-                    "edge": edge,
-                    "won": won,
-                    "profit": profit,
-                })
+                    bets.append({
+                        "week": int(week),
+                        "edge": edge,
+                        "won": won,
+                        "profit": profit,
+                    })
+            else:
+                # For spread/totals: original logic
+                # Estimate edge based on prediction confidence
+                # edge = abs(pred - market_line) / 10
+                # We simulate market line as actual + noise
+                market_line = actual + np.random.normal(0, 2)
+                diff = abs(pred - market_line)
+                edge = min(diff / 10, 0.15)
 
-                # Track by week
+                if edge >= self.min_edge:
+                    # Determine bet direction
+                    bet_home = pred < market_line
+
+                    # Determine outcome
+                    if bet_home:
+                        won = actual < market_line
+                    else:
+                        won = actual > market_line
+
+                    # Calculate profit
+                    if won:
+                        profit = self.stake_per_bet * (100 / 110)
+                    else:
+                        profit = -self.stake_per_bet
+
+                    bets.append({
+                        "week": int(week),
+                        "edge": edge,
+                        "won": won,
+                        "profit": profit,
+                    })
+
+            # Track by week (if bet was made)
+            if bets and bets[-1]["week"] == int(week):
                 week_key = int(week)
                 if week_key not in weekly_data:
                     weekly_data[week_key] = {"wins": 0, "losses": 0, "profit": 0}
 
-                if won:
+                if bets[-1]["won"]:
                     weekly_data[week_key]["wins"] += 1
                 else:
                     weekly_data[week_key]["losses"] += 1
-                weekly_data[week_key]["profit"] += profit
+                weekly_data[week_key]["profit"] += bets[-1]["profit"]
 
         # Convert weekly data to list
         weekly_list = [

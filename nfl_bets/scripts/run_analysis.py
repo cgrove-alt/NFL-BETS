@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import polars as pl
 
 # Configure logging
 logging.basicConfig(
@@ -128,6 +129,11 @@ async def run_calibration_analysis(
     y_train = train_df[target_col]
     X_test = test_df.select(feature_cols)
     y_test = test_df[target_col]
+
+    # For moneyline, convert spread to binary (home_win = spread > 0)
+    if model_type == "moneyline":
+        y_train = pl.Series((y_train.to_numpy() > 0).astype(int))
+        y_test = pl.Series((y_test.to_numpy() > 0).astype(int))
 
     if len(X_train) == 0 or len(X_test) == 0:
         logger.warning("No data available for calibration analysis")
@@ -346,6 +352,10 @@ async def run_feature_analysis(
     ]]
     X_array = df.select(feature_names).to_numpy()
     y_array = df[target_col].to_numpy()
+
+    # Convert to binary for moneyline (home team wins = spread > 0)
+    if model_type == "moneyline":
+        y_array = (y_array > 0).astype(int)
 
     # Analyze
     model = _create_model(model_type)
